@@ -3278,6 +3278,11 @@ class WebAPIMixin:
         return response
 
     async def _api_fetch_community_index(self):
+        """Fetch the catalog and remote versions outside the event loop.
+
+        Returns:
+            The cached catalog response and HTTP status code.
+        """
         try:
             index_url = COMMUNITY_INDEX_URL
             cache_data = await asyncio.to_thread(
