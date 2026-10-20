@@ -16,6 +16,93 @@ from .storage import (
 )
 
 
+async def search_memes_multi_pack(
+    pack_contexts: list[dict[str, Any]],
+    plugin_data_dir: Path | str,
+    query: str,
+    embedding_provider: Any,
+    *,
+    top_k: int = 5,
+    min_score: float = 0.25,
+) -> dict[str, Any]:
+    """Search across multiple packs with complete semantic indexing.
+
+    Args:
+        pack_contexts: List of pack contexts, each with pack_id and pack_dir.
+        plugin_data_dir: Plugin data directory containing semantic indexes.
+        query: Semantic query text.
+        embedding_provider: Embedding model provider used by pack indexes.
+        top_k: Maximum number of candidates to return (total across all packs).
+        min_score: Minimum cosine similarity score required for candidates.
+
+    Returns:
+        Search result with validated candidates from all packs.
+    """
+    if not str(query or "").strip():
+        return {"ok": True, "candidates": [], "reason": "查询词不能为空"}
+
+    all_candidates = []
+    searched_packs = []
+
+    for ctx in pack_contexts:
+        pack_id = ctx.get("pack_id")
+        pack_dir = ctx.get("pack_dir")
+        if not pack_id or not pack_dir:
+            continue
+
+        metadata = load_metadata(pack_dir)
+        if not metadata.get("images"):
+            continue
+        if not semantic_metadata_is_complete(
+            pack_dir, metadata, require_embeddings=True
+        ):
+            continue
+
+        candidates = await search_index(
+            plugin_data_dir,
+            pack_id,
+            query,
+            EmbeddingAdapter(embedding_provider),
+            metadata,
+            top_k=top_k,
+            min_score=min_score,
+        )
+
+        # Tag each candidate with source pack_id for traceability.
+        for item in candidates:
+            item["_source_pack_id"] = pack_id
+            item.pop("content_sha256", None)
+            item.pop("entry_id", None)
+
+        all_candidates.extend(candidates)
+        searched_packs.append(pack_id)
+
+    if not all_candidates:
+        reason_suffix = (
+            f" (已检索 {len(searched_packs)} 个表情包)" if searched_packs else ""
+        )
+        return {
+            "ok": True,
+            "candidates": [],
+            "reason": f"没有找到足够匹配的表情包{reason_suffix}",
+        }
+
+    # Sort by score descending and take top_k across all packs.
+    all_candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
+    top_candidates = all_candidates[:top_k]
+
+    # Remove score field from final output.
+    for item in top_candidates:
+        item.pop("score", None)
+
+    return {
+        "ok": True,
+        "candidates": top_candidates,
+        "max_selectable": 1,
+        "_searched_packs": searched_packs,
+    }
+
+
 async def search_memes(
     pack_dir: Path | str,
     plugin_data_dir: Path | str,
@@ -101,6 +188,55 @@ def candidate_records(
                 "tags": item.get("tags", []),
             }
         )
+    return records
+
+
+def candidate_records_multi_pack(
+    pack_contexts: list[dict[str, Any]], candidates: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Restore full semantic keys and content hashes for multi-pack candidates.
+
+    Args:
+        pack_contexts: List of pack contexts with pack_id and pack_dir.
+        candidates: Candidates returned by search_memes_multi_pack.
+
+    Returns:
+        Enriched candidate records with entry_id and content_sha256.
+    """
+    pack_dirs = {ctx["pack_id"]: ctx["pack_dir"] for ctx in pack_contexts}
+    records = []
+
+    for candidate in candidates:
+        source_pack_id = candidate.get("_source_pack_id")
+        if not source_pack_id or source_pack_id not in pack_dirs:
+            continue
+
+        pack_dir = pack_dirs[source_pack_id]
+        metadata = load_metadata(pack_dir)
+        value = str(candidate.get("id") or "")
+        prefix = parse_meme_id(value)
+        if not prefix:
+            continue
+
+        matches = [
+            (entry_id, item)
+            for entry_id, item in metadata.get("images", {}).items()
+            if str(entry_id).startswith(prefix)
+        ]
+        if len(matches) != 1:
+            continue
+
+        entry_id, item = matches[0]
+        records.append(
+            {
+                **candidate,
+                "entry_id": entry_id,
+                "content_sha256": str(item.get("content_sha256") or ""),
+                "caption": item.get("caption", ""),
+                "tags": item.get("tags", []),
+            }
+        )
+
     return records
 
 
