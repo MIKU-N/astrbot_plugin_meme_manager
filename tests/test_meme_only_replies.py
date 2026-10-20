@@ -87,7 +87,8 @@ async def test_final_filter_runs_after_selection(reply_context, enabled, empty_p
     )
     await sender._on_decorating_result_impl(event)
     visible = "".join(
-        component.text for component in state["result"].chain
+        component.text
+        for component in state["result"].chain
         if isinstance(component, Plain)
     )
     assert visible == ("Hello" if enabled else "Hello  :unknown: [unknown]")
@@ -104,7 +105,7 @@ async def test_empty_pack_stream_final_filter(reply_context, chunk_size):
 
     async def source():
         for index in range(0, len(text), chunk_size):
-            yield MessageChain([Plain(text[index:index + chunk_size])])
+            yield MessageChain([Plain(text[index : index + chunk_size])])
 
     visible = "".join(
         [
