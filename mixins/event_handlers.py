@@ -29,6 +29,7 @@ from ..backend.meme_parser.text_safety import (
 )
 from ..backend.packs.categories import resolve_safe_category_directory
 from ..backend.packs.images import IMAGE_EXTENSIONS
+from ..backend.packs.resolver import get_pack_paths
 from ..backend.semantic.models import (
     REVIEW_CATEGORY,
     compact_semantic_query,
@@ -37,9 +38,9 @@ from ..backend.semantic.models import (
     runtime_category_mapping,
 )
 from ..backend.semantic.query import (
-    candidate_records,
+    candidate_records_multi_pack,
     remember_candidates,
-    search_memes,
+    search_memes_multi_pack,
     validate_selected_id,
 )
 from ..backend.semantic.storage import invalidate_semantic_metadata
@@ -574,6 +575,41 @@ class EventHandlerMixin:
         limit = getattr(self, "max_memes_per_message", -1)
         return selections[:limit] if limit >= 0 else selections
 
+    def _get_category_meme_files(
+        self, event: AstrMessageEvent, emotion: str
+    ) -> list[Path]:
+        """Collect category images from all currently bound packs.
+
+        Args:
+            event: Event used to resolve the current pack bindings.
+            emotion: Category name selected for delivery.
+
+        Returns:
+            Image paths from every bound pack, excluding review categories.
+        """
+        if not emotion or emotion == REVIEW_CATEGORY:
+            return []
+        context = self._resolve_runtime_pack_context(event=event)
+        roots = [
+            Path(directory) / "memes"
+            for directory in context.get("pack_dirs", {}).values()
+        ]
+        if not roots:
+            roots = [Path(self._get_runtime_memes_dir_for_event(event))]
+        images = []
+        for root in roots:
+            try:
+                directory = resolve_safe_category_directory(root, emotion)
+            except ValueError:
+                continue
+            if directory.is_dir():
+                images.extend(
+                    path
+                    for path in directory.iterdir()
+                    if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+                )
+        return images
+
     async def _build_emotion_images_for_event(
         self,
         event: AstrMessageEvent,
@@ -587,31 +623,15 @@ class EventHandlerMixin:
         if random_value > self.emotions_probability:
             return [], []
 
-        memes_root = self._get_runtime_memes_dir_for_event(event)
         emotion_images: list[Image] = []
         temp_files: list[str] = []
 
         for emotion in self._limit_meme_selection(emotions):
-            if not emotion or emotion == REVIEW_CATEGORY:
-                continue
-
-            try:
-                emotion_path = resolve_safe_category_directory(memes_root, emotion)
-            except ValueError:
-                continue
-            if not emotion_path.is_dir():
-                continue
-
-            memes = [
-                f
-                for f in os.listdir(emotion_path)
-                if f.lower().endswith(IMAGE_EXTENSIONS)
-            ]
+            memes = self._get_category_meme_files(event, emotion)
             if not memes:
                 continue
 
-            meme = random.choice(memes)
-            meme_file = str(emotion_path / meme)
+            meme_file = str(random.choice(memes))
 
             try:
                 final_meme_file = await asyncio.to_thread(
@@ -928,24 +948,27 @@ class EventHandlerMixin:
         visible_text = extract_visible_semantic_reply(text)
         query = await self._build_emotion_semantic_query(event, visible_text)
         pack_context = self._resolve_runtime_pack_context(event=event)
-        pack_id = str(pack_context.get("pack_id") or "")
-        verified_pack_id = str(
-            event.get_extra("meme_manager_semantic_verified_pack_id") or ""
-        )
+        pack_ids = pack_context.get("pack_ids", [])
         selected_id = ""
         try:
-            result = await search_memes(
-                pack_context["pack_dir"],
+            if ",".join(pack_ids) != str(
+                event.get_extra("meme_manager_semantic_verified_pack_ids") or ""
+            ):
+                return await self._resp_semantic_impl(event, response, text)
+            pack_contexts = [
+                {"pack_id": pack_id, "pack_dir": get_pack_paths(pack_id)["pack_dir"]}
+                for pack_id in pack_ids
+            ]
+            result = await search_memes_multi_pack(
+                pack_contexts,
                 PLUGIN_DATA_DIR,
-                pack_id,
                 query,
-                self._resolve_embedding_provider(pack_id),
+                self._resolve_embedding_provider,
                 top_k=self.semantic_top_k,
                 min_score=self.semantic_min_score,
-                _verified_complete=pack_id == verified_pack_id,
             )
             candidates = result.get("candidates") or []
-            records = candidate_records(pack_context["pack_dir"], candidates)
+            records = candidate_records_multi_pack(pack_contexts, candidates)
             remember_candidates(event, records)
             event.set_extra("meme_manager_semantic_query", query)
             if candidates:
@@ -1177,7 +1200,7 @@ class EventHandlerMixin:
         clean_text = parser.feed(text or "") + parser.finish()
         referenced_ids = parser.selections
         for value in referenced_ids:
-            if validate_selected_id(event, value, pack_context.get("pack_dir")):
+            if validate_selected_id(event, value, pack_context):
                 if value not in selected_ids:
                     selected_ids.append(value)
             else:
@@ -1258,14 +1281,11 @@ class EventHandlerMixin:
                 and semantic_selected_ids
                 and self._semantic_mode_active(event)
             ):
-                memes_root = self._get_runtime_memes_dir_for_event(event)
                 pack_context = self._resolve_runtime_pack_context(event=event)
                 semantic_images = []
                 semantic_temp_files = []
                 for selected_id in self._limit_meme_selection(semantic_selected_ids):
-                    image_path = validate_selected_id(
-                        event, selected_id, pack_context.get("pack_dir")
-                    )
+                    image_path = validate_selected_id(event, selected_id, pack_context)
                     if image_path is None:
                         continue
                     try:
@@ -1303,7 +1323,6 @@ class EventHandlerMixin:
             # 第三步：旧模式添加表情图片（如果有找到的表情）
             found_emotions = event.get_extra("found_emotions") or []
             if scope_allows_attach and found_emotions and not semantic_selected_ids:
-                memes_root = self._get_runtime_memes_dir_for_event(event)
                 # 概率判定复用 _resp_impl 阶段的预检结果（避免二次掷骰）；
                 # extra 缺失（异常路径）时回退本地掷骰，保持旧行为。
                 legacy_probability_hit = event.get_extra(
@@ -1316,29 +1335,10 @@ class EventHandlerMixin:
                     emotion_images = []
                     temp_files = []  # 记录临时文件路径
                     for emotion in self._limit_meme_selection(found_emotions):
-                        if not emotion or emotion == REVIEW_CATEGORY:
-                            continue
-
-                        try:
-                            emotion_path = resolve_safe_category_directory(
-                                memes_root, emotion
-                            )
-                        except ValueError:
-                            continue
-                        if not emotion_path.is_dir():
-                            continue
-
-                        memes = [
-                            f
-                            for f in os.listdir(emotion_path)
-                            if f.lower().endswith(IMAGE_EXTENSIONS)
-                        ]
-
+                        memes = self._get_category_meme_files(event, emotion)
                         if not memes:
                             continue
-
-                        meme = random.choice(memes)
-                        meme_file = str(emotion_path / meme)
+                        meme_file = str(random.choice(memes))
 
                         try:
                             # 转换静态图为 GIF（如果配置开启）
@@ -1488,9 +1488,7 @@ class EventHandlerMixin:
             pack_context = self._resolve_runtime_pack_context(event=event)
             try:
                 for selected_id in self._limit_meme_selection(semantic_selected_ids):
-                    image_path = validate_selected_id(
-                        event, selected_id, pack_context.get("pack_dir")
-                    )
+                    image_path = validate_selected_id(event, selected_id, pack_context)
                     if image_path is None:
                         continue
                     final_path = await asyncio.to_thread(
@@ -1512,8 +1510,6 @@ class EventHandlerMixin:
         if not found_emotions:
             return
 
-        memes_root = self._get_runtime_memes_dir_for_event(event)
-
         try:
             # 概率判定复用 _resp_impl 阶段的预检结果；extra 缺失时回退本地掷骰。
             legacy_probability_hit = event.get_extra(
@@ -1525,26 +1521,10 @@ class EventHandlerMixin:
                 return
 
             for emotion in self._limit_meme_selection(found_emotions):
-                if not emotion or emotion == REVIEW_CATEGORY:
-                    continue
-
-                try:
-                    emotion_path = resolve_safe_category_directory(memes_root, emotion)
-                except ValueError:
-                    continue
-                if not emotion_path.is_dir():
-                    continue
-
-                memes = [
-                    f
-                    for f in os.listdir(emotion_path)
-                    if f.lower().endswith(IMAGE_EXTENSIONS)
-                ]
+                memes = self._get_category_meme_files(event, emotion)
                 if not memes:
                     continue
-
-                meme = random.choice(memes)
-                meme_file = str(emotion_path / meme)
+                meme_file = str(random.choice(memes))
                 final_meme_file = await asyncio.to_thread(
                     self._convert_to_gif, meme_file
                 )

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from astrbot.api import logger
+
 from .index import EmbeddingAdapter, search_index
-from .models import REVIEW_CATEGORY, parse_meme_id
+from .models import REVIEW_CATEGORY, build_id_map, parse_meme_id
 from .storage import (
     file_sha256,
     load_metadata,
@@ -20,7 +24,7 @@ async def search_memes_multi_pack(
     pack_contexts: list[dict[str, Any]],
     plugin_data_dir: Path | str,
     query: str,
-    embedding_provider: Any,
+    resolve_embedding_provider: Callable[[str], Any],
     *,
     top_k: int = 5,
     min_score: float = 0.25,
@@ -31,7 +35,7 @@ async def search_memes_multi_pack(
         pack_contexts: List of pack contexts, each with pack_id and pack_dir.
         plugin_data_dir: Plugin data directory containing semantic indexes.
         query: Semantic query text.
-        embedding_provider: Embedding model provider used by pack indexes.
+        resolve_embedding_provider: Resolve the embedding provider for each pack.
         top_k: Maximum number of candidates to return (total across all packs).
         min_score: Minimum cosine similarity score required for candidates.
 
@@ -43,6 +47,7 @@ async def search_memes_multi_pack(
 
     all_candidates = []
     searched_packs = []
+    all_entry_ids = set()
 
     for ctx in pack_contexts:
         pack_id = ctx.get("pack_id")
@@ -50,32 +55,38 @@ async def search_memes_multi_pack(
         if not pack_id or not pack_dir:
             continue
 
-        metadata = load_metadata(pack_dir)
-        if not metadata.get("images"):
+        try:
+            metadata = await asyncio.to_thread(load_metadata, pack_dir)
+            if not metadata.get("images"):
+                continue
+            if not await asyncio.to_thread(
+                semantic_metadata_is_complete,
+                pack_dir,
+                metadata,
+                require_embeddings=True,
+            ):
+                continue
+            candidates = await search_index(
+                plugin_data_dir,
+                pack_id,
+                query,
+                EmbeddingAdapter(resolve_embedding_provider(pack_id)),
+                metadata,
+                top_k=top_k,
+                min_score=min_score,
+            )
+        except Exception:
+            logger.warning("Semantic search failed for pack %s", pack_id, exc_info=True)
             continue
-        if not semantic_metadata_is_complete(
-            pack_dir, metadata, require_embeddings=True
-        ):
-            continue
-
-        candidates = await search_index(
-            plugin_data_dir,
-            pack_id,
-            query,
-            EmbeddingAdapter(embedding_provider),
-            metadata,
-            top_k=top_k,
-            min_score=min_score,
-        )
 
         # Tag each candidate with source pack_id for traceability.
         for item in candidates:
             item["_source_pack_id"] = pack_id
             item.pop("content_sha256", None)
-            item.pop("entry_id", None)
 
         all_candidates.extend(candidates)
         searched_packs.append(pack_id)
+        all_entry_ids.update(metadata["images"])
 
     if not all_candidates:
         reason_suffix = (
@@ -89,7 +100,17 @@ async def search_memes_multi_pack(
 
     # Sort by score descending and take top_k across all packs.
     all_candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
-    top_candidates = all_candidates[:top_k]
+    id_map = build_id_map(all_entry_ids)
+    top_candidates = []
+    seen_entries = set()
+    for item in all_candidates:
+        entry_id = item.pop("entry_id")
+        if entry_id in seen_entries:
+            continue
+        seen_entries.add(entry_id)
+        item["id"] = id_map[entry_id]
+        top_candidates.append(item)
+    top_candidates = top_candidates[: max(0, int(top_k))]
 
     # Remove score field from final output.
     for item in top_candidates:
@@ -257,7 +278,19 @@ def remember_candidates(event: Any, candidates: list[dict[str, Any]]) -> None:
         )
 
 
-def validate_selected_id(event: Any, value: str, pack_dir: Path | str) -> Path | None:
+def validate_selected_id(
+    event: Any, value: str, pack_dir: Path | str | dict[str, Any]
+) -> Path | None:
+    """Validate a candidate against its currently bound source pack.
+
+    Args:
+        event: Event containing the candidates returned by this turn's search.
+        value: The exact public candidate ID selected by the model.
+        pack_dir: Current runtime context, or a directory for single-pack callers.
+
+    Returns:
+        The verified image path, or None for stale or invalid selections.
+    """
     prefix = parse_meme_id(value)
     if not prefix:
         return None
@@ -273,6 +306,17 @@ def validate_selected_id(event: Any, value: str, pack_dir: Path | str) -> Path |
     )
     if not isinstance(candidate, dict):
         return None
+    if isinstance(pack_dir, dict):
+        context = pack_dir
+        source_pack_id = candidate.get("_source_pack_id")
+        if source_pack_id:
+            if source_pack_id not in context.get("pack_ids", []):
+                return None
+            pack_dir = context.get("pack_dirs", {}).get(source_pack_id)
+        else:
+            pack_dir = context.get("pack_dir")
+        if pack_dir is None:
+            return None
     entry_id = str(candidate.get("entry_id") or "")
     if not entry_id.startswith(prefix):
         return None
