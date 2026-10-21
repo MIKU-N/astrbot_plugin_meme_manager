@@ -16,6 +16,7 @@
       image_count: 18,
       category_count: 3,
       semantic_caption_complete: true,
+      supports_vector_rebuild: true,
     },
     {
       id: "weekend",
@@ -452,7 +453,7 @@
           index_embedding_dimension: 1024,
           vision_model: "Example vision",
           elapsed_seconds: 84,
-          semantic_caption_complete: false,
+          semantic_caption_complete: !params.has("incomplete_descriptions"),
           semantic_enabled: true,
           semantic_config_ready: true,
         };
@@ -488,6 +489,8 @@
       case "semantic/retry-failed":
         taskStatus = "running";
         return { message: "任务已开始" };
+      case "semantic/rebuild-index":
+        return { message: body.force ? "全量重建完成" : "增量处理完成" };
       case "semantic/pause":
         taskStatus = "paused";
         return { message: "任务已暂停" };

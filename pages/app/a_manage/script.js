@@ -724,6 +724,9 @@ async function initApp() {
   const packVectorStatusText = document.getElementById(
     "pack-vector-status-text",
   );
+  const incrementPackVectorsBtn = document.getElementById(
+    "increment-pack-vectors-btn",
+  );
   const rebuildPackVectorsBtn = document.getElementById(
     "rebuild-pack-vectors-btn",
   );
@@ -780,6 +783,9 @@ async function initApp() {
   let pendingPackImportToken = "";
   let exportCapabilityRequestId = 0;
   let managePackVectorStatusRequestId = 0;
+  let managePageActive = true;
+  let vectorStatusPollInFlight = false;
+  const vectorOperations = new Set();
   let latestManagePackVectorStatus = null;
   let latestManagePackVectorStatusId = "";
   let confirmResolver = null;
@@ -1060,6 +1066,7 @@ async function initApp() {
   function hideManagePackVectorStatus() {
     packVectorStatus?.classList.add("hidden");
     rebuildPackVectorsBtn?.classList.add("hidden");
+    incrementPackVectorsBtn?.classList.add("hidden");
     latestManagePackVectorStatus = null;
     latestManagePackVectorStatusId = "";
   }
@@ -1080,6 +1087,16 @@ async function initApp() {
       "vector-loading",
     );
     rebuildPackVectorsBtn?.classList.remove("hidden");
+    incrementPackVectorsBtn?.classList.remove("hidden");
+    if (incrementPackVectorsBtn) {
+      incrementPackVectorsBtn.disabled =
+        state !== "ready" ||
+        !status?.embedding_provider_ready ||
+        vectorOperations.has(normalizedPackId) ||
+        ["running", "paused"].includes(String(status?.task_status || ""));
+      incrementPackVectorsBtn.title =
+        "复用有效向量，仅处理已完成描述的新增或变化图片；模型或维度变化时需要重建。";
+    }
 
     if (state === "loading") {
       packVectorStatus?.classList.add("vector-loading");
@@ -1119,7 +1136,9 @@ async function initApp() {
     );
     const indexDimension = Number(status.index_embedding_dimension || 0);
     const taskStatus = String(status.task_status || "idle");
-    const taskBusy = ["running", "paused"].includes(taskStatus);
+    const taskBusy =
+      vectorOperations.has(normalizedPackId) ||
+      ["running", "paused"].includes(taskStatus);
     const currentDimensionLabel = configuredDimension
       ? `${configuredDimension} 维`
       : "维度待检测";
@@ -1195,40 +1214,55 @@ async function initApp() {
       rebuildPackVectorsBtn.title = taskBusy
         ? "语义任务进行中，结束后才能重建向量。"
         : !captionComplete
-          ? "请先完成当前包的全部语义描述。"
-          : "使用当前向量模型重新建立本机向量索引。";
+        ? "请先完成当前包的全部语义描述。"
+        : "使用当前向量模型重新建立本机向量索引。";
       rebuildPackVectorsBtn.innerHTML = taskBusy
         ? '<i class="fas fa-spinner fa-spin icon"></i>正在处理'
         : !captionComplete
-          ? '<i class="fas fa-clock icon"></i>等待语义描述'
-          : `<i class="fas fa-arrows-rotate icon"></i>按${
-              configuredDimension ? ` ${configuredDimension} 维` : "当前维度"
-            }重建`;
+        ? '<i class="fas fa-clock icon"></i>等待语义描述'
+        : `<i class="fas fa-arrows-rotate icon"></i>按${
+            configuredDimension ? ` ${configuredDimension} 维` : "当前维度"
+          }重建`;
     }
   }
 
   async function refreshManagePackVectorStatus(packId = activeManagePackId) {
     const normalizedPackId = String(packId || "").trim();
-    const requestId = ++managePackVectorStatusRequestId;
+    if (!managePageActive) return null;
+    const updateCurrentPack = normalizedPackId === activeManagePackId;
+    const requestId = updateCurrentPack
+      ? ++managePackVectorStatusRequestId
+      : null;
     if (!normalizedPackId || !packSupportsVectorStatus(normalizedPackId)) {
-      hideManagePackVectorStatus();
+      if (updateCurrentPack) hideManagePackVectorStatus();
       return null;
     }
 
-    renderManagePackVectorStatus(normalizedPackId, null, "loading");
+    if (updateCurrentPack) {
+      renderManagePackVectorStatus(normalizedPackId, null, "loading");
+    }
     try {
       const status = await apiGet("semantic/status", {
         pack_id: normalizedPackId,
       });
-      if (requestId !== managePackVectorStatusRequestId) {
-        return null;
+      if (
+        managePageActive &&
+        updateCurrentPack &&
+        normalizedPackId === activeManagePackId &&
+        requestId === managePackVectorStatusRequestId
+      ) {
+        latestManagePackVectorStatus = status;
+        latestManagePackVectorStatusId = normalizedPackId;
+        renderManagePackVectorStatus(normalizedPackId, status);
       }
-      latestManagePackVectorStatus = status;
-      latestManagePackVectorStatusId = normalizedPackId;
-      renderManagePackVectorStatus(normalizedPackId, status);
       return status;
     } catch (error) {
-      if (requestId === managePackVectorStatusRequestId) {
+      if (
+        managePageActive &&
+        updateCurrentPack &&
+        normalizedPackId === activeManagePackId &&
+        requestId === managePackVectorStatusRequestId
+      ) {
         latestManagePackVectorStatus = null;
         latestManagePackVectorStatusId = "";
         renderManagePackVectorStatus(normalizedPackId, null, "error");
@@ -1238,7 +1272,11 @@ async function initApp() {
     }
   }
 
-  async function performVectorRebuild(packId, knownStatus = null) {
+  async function performVectorRebuild(
+    packId,
+    knownStatus = null,
+    incremental = false,
+  ) {
     const normalizedPackId = String(packId || "").trim();
     if (!normalizedPackId || !packSupportsVectorStatus(normalizedPackId)) {
       showToast("旧版表情包不支持向量重建。", "warning", "无法重建");
@@ -1262,7 +1300,7 @@ async function initApp() {
       );
       return false;
     }
-    if (!status.semantic_caption_complete) {
+    if (!incremental && !status.semantic_caption_complete) {
       showToast("请先完成当前包的全部语义描述。", "warning", "暂不能重建");
       return false;
     }
@@ -1270,23 +1308,46 @@ async function initApp() {
       showToast("当前语义任务尚未结束。", "warning", "暂不能重建");
       return false;
     }
+    if (vectorOperations.has(normalizedPackId)) return false;
+    vectorOperations.add(normalizedPackId);
 
-    setButtonBusy(rebuildPackVectorsBtn, "正在重建…");
+    const button = incremental
+      ? incrementPackVectorsBtn
+      : rebuildPackVectorsBtn;
+    setButtonBusy(button, incremental ? "正在增量处理…" : "正在重建…");
+    if (incrementPackVectorsBtn) incrementPackVectorsBtn.disabled = true;
+    if (rebuildPackVectorsBtn) rebuildPackVectorsBtn.disabled = true;
     try {
-      showToast("正在按当前向量模型建立索引…", "info", "开始重建");
+      showToast(
+        incremental ? "正在增量更新向量索引…" : "正在按当前向量模型建立索引…",
+        "info",
+        incremental ? "增量处理" : "开始重建",
+      );
       const result = await apiPost("semantic/rebuild-index", {
         pack_id: normalizedPackId,
-        force: true,
+        force: !incremental,
       });
       await refreshManagePackSummaries();
-      showToast(result?.message || "向量索引已建立。", "success", "重建完成");
+      showToast(
+        result?.message || "向量索引已建立。",
+        "success",
+        incremental ? "增量处理完成" : "重建完成",
+      );
       return true;
     } catch (error) {
-      showToast(error?.message || String(error), "error", "向量重建失败", 5000);
+      showToast(
+        error?.message || String(error),
+        "error",
+        incremental ? "增量处理失败" : "向量重建失败",
+        5000,
+      );
       return false;
     } finally {
-      restoreButton(rebuildPackVectorsBtn);
-      await refreshManagePackVectorStatus(normalizedPackId);
+      vectorOperations.delete(normalizedPackId);
+      if (managePageActive && normalizedPackId === activeManagePackId) {
+        restoreButton(button);
+        await refreshManagePackVectorStatus(normalizedPackId);
+      }
     }
   }
 
@@ -6905,6 +6966,9 @@ async function initApp() {
   packImportConfirmBtn?.addEventListener("click", () => {
     void confirmPackImport();
   });
+  incrementPackVectorsBtn?.addEventListener("click", () => {
+    void performVectorRebuild(activeManagePackId, null, true);
+  });
   rebuildPackVectorsBtn?.addEventListener("click", () => {
     const packId = String(activeManagePackId || "").trim();
     const status =
@@ -6935,13 +6999,38 @@ async function initApp() {
     !collectionReview.open.hidden
   )
     collectionReview.open.click();
-  window.setInterval(() => {
+  window.addEventListener("pagehide", () => {
+    managePageActive = false;
+    managePackVectorStatusRequestId++;
+  });
+  window.addEventListener("pageshow", () => {
+    managePageActive = true;
+  });
+  window.setInterval(async () => {
     if (
+      managePageActive &&
       !document.hidden &&
       !collectionReview.dialog.open &&
       !collectionReview.busy
     )
       void loadCollectionReview();
+    if (
+      managePageActive &&
+      !document.hidden &&
+      !collectionReview.busy &&
+      !vectorStatusPollInFlight &&
+      !vectorOperations.has(activeManagePackId) &&
+      activeManagePackId
+    ) {
+      vectorStatusPollInFlight = true;
+      try {
+        await refreshManagePackVectorStatus(activeManagePackId);
+      } catch (error) {
+        console.warn("Failed to refresh vector status", error);
+      } finally {
+        vectorStatusPollInFlight = false;
+      }
+    }
   }, 30000);
   semanticReviewStats?.addEventListener("click", (event) => {
     const button = event.target.closest("button[data-review-filter]");
