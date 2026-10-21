@@ -35,6 +35,7 @@ from ..backend.packs.images import (
     scan_emoji_folder,
 )
 from ..backend.packs.protocol import validate_pack_id
+from ..backend.packs.resolver import _normalize_pack_ids
 from ..backend.packs.storage import (
     InstallCancelledError,
     create_local_pack,
@@ -3741,7 +3742,9 @@ class WebAPIMixin:
             rules = (data or {}).get("rules", [])
             before = get_selection_rules()
             before_map = {
-                str(item.get("id") or ""): str(item.get("pack_id") or "")
+                str(item.get("id") or ""): _normalize_pack_ids(
+                    item.get("pack_ids") or item.get("pack_id")
+                )
                 for item in before.get("rules", [])
                 if isinstance(item, dict)
             }
@@ -3753,14 +3756,17 @@ class WebAPIMixin:
                     if not isinstance(item, dict):
                         continue
                     rule_id = str(item.get("id") or "")
-                    pack_id = str(item.get("pack_id") or "")
-                    if before_map.get(rule_id) == pack_id or not pack_id:
-                        continue
-                    status = self.semantic_task_manager.status(pack_id)
-                    if status.get("dimension_rebuild_required") and status.get(
-                        "semantic_caption_complete"
-                    ):
-                        rebuild_packs.append(pack_id)
+                    pack_ids = _normalize_pack_ids(
+                        item.get("pack_ids") or item.get("pack_id")
+                    )
+                    for pack_id in pack_ids:
+                        if pack_id in before_map.get(rule_id, []):
+                            continue
+                        status = self.semantic_task_manager.status(pack_id)
+                        if status.get("dimension_rebuild_required") and status.get(
+                            "semantic_caption_complete"
+                        ):
+                            rebuild_packs.append(pack_id)
             saved["semantic_rebuild_packs"] = sorted(set(rebuild_packs))
             return jsonify({"message": "规则保存成功", **saved}), 200
         except ValueError as e:

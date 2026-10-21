@@ -612,40 +612,30 @@ class MemeSender(Star, WebAPIMixin, CommandMixin, EventHandlerMixin):
         if not pack_ids:
             return False
 
-        # At least one pack must be fully indexed.
+        # A broken pack must not disable healthy packs in the same binding.
         for pack_id in pack_ids:
-            paths = get_pack_paths(pack_id)
-            pack_dir = paths["pack_dir"]
-            metadata = load_metadata(pack_dir)
-            if not semantic_metadata_is_complete(
-                pack_dir, metadata, require_embeddings=True
-            ):
-                continue
             try:
+                pack_dir = get_pack_paths(pack_id)["pack_dir"]
+                metadata = load_metadata(pack_dir)
+                if not semantic_metadata_is_complete(
+                    pack_dir, metadata, require_embeddings=True
+                ):
+                    continue
                 provider = self._resolve_embedding_provider(pack_id)
                 embedding = EmbeddingAdapter(
                     provider, self.semantic_embedding_provider_id or ""
                 )
-            except Exception as exc:
-                logger.debug(
-                    "Pack %s semantic check failed: %s",
-                    pack_id,
-                    exc,
-                )
-                continue
-            provider_id = embedding.provider_id
-            if (
-                index_is_ready(
+                if embedding.ready and index_is_ready(
                     PLUGIN_DATA_DIR,
                     pack_id,
                     metadata,
-                    provider_id,
+                    embedding.provider_id,
                     embedding.model_name,
                     embedding.dimension,
-                )
-                and embedding.ready
-            ):
-                return True
+                ):
+                    return True
+            except Exception as exc:
+                logger.warning("Pack %s semantic check failed: %s", pack_id, exc)
 
         return False
 
@@ -901,14 +891,20 @@ class MemeSender(Star, WebAPIMixin, CommandMixin, EventHandlerMixin):
             else runtime_category_mapping(self.category_mapping)
         )
         # 首次安装时即使没有可用图片，也可能已有分类描述。
-        memes_dir = Path(pack_context["memes_dir"])
+        memes_dirs = [
+            Path(directory) / "memes"
+            for directory in pack_context.get("pack_dirs", {}).values()
+        ] or [Path(pack_context["memes_dir"])]
         category_mapping = {
             key: description
             for key, description in category_mapping.items()
-            if (memes_dir / key).is_dir()
-            and any(
-                image.is_file() and image.suffix.lower() in IMAGE_EXTENSIONS
-                for image in (memes_dir / key).iterdir()
+            if any(
+                (memes_dir / key).is_dir()
+                and any(
+                    image.is_file() and image.suffix.lower() in IMAGE_EXTENSIONS
+                    for image in (memes_dir / key).iterdir()
+                )
+                for memes_dir in memes_dirs
             )
         }
         req.system_prompt = self._strip_meme_prompt(req.system_prompt)
@@ -979,7 +975,7 @@ class MemeSender(Star, WebAPIMixin, CommandMixin, EventHandlerMixin):
             return dumps_result({"ok": False, "reason": "当前语义图包已经变化"})
 
         try:
-            # Build pack contexts for multi-pack search.
+            # Resolve providers separately because packs can use different indexes.
             pack_contexts = []
             for pack_id in pack_ids:
                 paths = get_pack_paths(pack_id)
@@ -987,15 +983,11 @@ class MemeSender(Star, WebAPIMixin, CommandMixin, EventHandlerMixin):
                     {"pack_id": pack_id, "pack_dir": paths["pack_dir"]}
                 )
 
-            # Use the primary pack's embedding provider.
-            primary_pack_id = pack_ids[0] if pack_ids else ""
-            embedding_provider = self._resolve_embedding_provider(primary_pack_id)
-
             result = await search_memes_multi_pack(
                 pack_contexts,
                 PLUGIN_DATA_DIR,
                 query,
-                embedding_provider,
+                self._resolve_embedding_provider,
                 top_k=self.semantic_top_k,
                 min_score=self.semantic_min_score,
             )

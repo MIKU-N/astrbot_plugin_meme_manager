@@ -574,15 +574,17 @@ async function initSettingsPage() {
     return rules.findIndex((rule) => rule.scope === "default");
   }
 
-  function appendPackOptions(select, selectedPackId = "") {
-    if (
-      !installedPacks.some((pack) => String(pack.id) === String(selectedPackId))
-    ) {
+  function getRulePackIds(rule) {
+    const values = Array.isArray(rule.pack_ids) && rule.pack_ids.length
+      ? rule.pack_ids : [rule.pack_id];
+    return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))];
+  }
+
+  function appendPackOptions(select, selectedPackIds = []) {
+    for (const missingId of selectedPackIds.filter((id) => !installedPacks.some((pack) => String(pack.id) === id))) {
       const missingOption = document.createElement("option");
-      missingOption.value = String(selectedPackId || "");
-      missingOption.textContent = selectedPackId
-        ? `表情包不存在（${selectedPackId}）`
-        : "请选择表情包";
+      missingOption.value = missingId;
+      missingOption.textContent = `表情包不存在（${missingId}）`;
       missingOption.selected = true;
       select.appendChild(missingOption);
     }
@@ -590,7 +592,7 @@ async function initSettingsPage() {
       const packId = String(pack.id || "");
       const option = document.createElement("option");
       option.value = packId;
-      option.selected = packId === String(selectedPackId);
+      option.selected = selectedPackIds.includes(packId);
       option.textContent = `${pack.name || packId} (${packId})`;
       select.appendChild(option);
     }
@@ -678,7 +680,7 @@ async function initSettingsPage() {
       const position = `第 ${index + 1} 条`;
       const id = String(rule.id || "").trim();
       const scope = String(rule.scope || "").trim();
-      const packId = String(rule.pack_id || "").trim();
+      const packIds = getRulePackIds(rule);
       const target = String(rule.target || "").trim();
 
       if (!id) {
@@ -692,9 +694,9 @@ async function initSettingsPage() {
       if (!["persona", "session", "default"].includes(scope)) {
         errors.push(`${position} 的匹配类型无效: ${scope || "(空)"}`);
       }
-      if (!packId) {
+      if (!packIds.length) {
         errors.push(`${position} 尚未选择表情包`);
-      } else if (!installedPacks.some((pack) => String(pack.id) === packId)) {
+      } else if (packIds.some((id) => !installedPacks.some((pack) => String(pack.id) === id))) {
         errors.push(`${position} 的表情包已不存在，请重新选择`);
       }
 
@@ -859,8 +861,12 @@ async function initSettingsPage() {
       const packSelectElement = document.createElement("select");
       packSelectElement.dataset.role = "pack";
       packSelectElement.id = `rule-pack-${index}`;
-      appendPackOptions(packSelectElement, rule.pack_id);
-      packField.append(packLabel, packSelectElement);
+      packSelectElement.multiple = true;
+      packSelectElement.size = Math.min(5, Math.max(2, installedPacks.length));
+      appendPackOptions(packSelectElement, getRulePackIds(rule));
+      const packHelp = document.createElement("small");
+      packHelp.textContent = "可多选；桌面端按住 Ctrl / Command 点击。先选的表情包优先。";
+      packField.append(packLabel, packSelectElement, packHelp);
 
       grid.appendChild(scopeField);
       grid.appendChild(targetField);
@@ -919,7 +925,14 @@ async function initSettingsPage() {
       });
 
       packSelect.addEventListener("change", () => {
-        updateRuleFromInput(index, "pack_id", packSelect.value);
+        const selected = Array.from(packSelect.selectedOptions, (option) => option.value);
+        const previous = getRulePackIds(rules[index]);
+        const ordered = [
+          ...previous.filter((id) => selected.includes(id)),
+          ...selected.filter((id) => !previous.includes(id)),
+        ];
+        rules[index].pack_id = ordered[0] || "";
+        updateRuleFromInput(index, "pack_ids", ordered);
       });
 
       actions
@@ -1046,6 +1059,11 @@ async function initSettingsPage() {
         scope: String(rule.scope || "").trim(),
         pack_id: String(rule.pack_id || "").trim(),
       };
+      const packIds = getRulePackIds(rule);
+      normalized.pack_id = packIds[0] || "";
+      if (packIds.length > 1 || Array.isArray(rule.pack_ids)) {
+        normalized.pack_ids = packIds;
+      }
       if (normalized.scope !== "default") {
         normalized.target = String(rule.target || "").trim();
       }

@@ -54,7 +54,7 @@ def _normalize_pack_ids(raw_value) -> list[str]:
         result = []
         for item in raw_value:
             pack_id = str(item or "").strip()
-            if pack_id:
+            if pack_id and pack_id not in result:
                 result.append(pack_id)
         return result
     return []
@@ -122,15 +122,20 @@ def resolve_pack_ids(
             ):
                 return valid_ids
 
-    # Fallback: try resolved default, then built-in default.
-    for fallback_id in resolved_default_ids + [DEFAULT_PACK_ID]:
-        if not fallback_id:
-            continue
-        if _pack_exists(fallback_id) and (
-            _is_pack_enabled(fallback_id, registry_data)
-            or fallback_id == DEFAULT_PACK_ID
-        ):
-            return [fallback_id]
+    valid_defaults = list(
+        dict.fromkeys(
+            pack_id
+            for pack_id in resolved_default_ids
+            if _pack_exists(pack_id)
+            and (_is_pack_enabled(pack_id, registry_data) or pack_id == DEFAULT_PACK_ID)
+        )
+    )
+    if valid_defaults:
+        return valid_defaults
+
+    # Fall back to the built-in default only when no selected pack is usable.
+    if _pack_exists(DEFAULT_PACK_ID):
+        return [DEFAULT_PACK_ID]
 
     # Last resort: first enabled pack in registry.
     installed = (
@@ -226,6 +231,7 @@ def resolve_pack_context(
     pack_ids = resolve_pack_ids(session_id=session_id, persona_id=persona_id)
     primary_pack_id = pack_ids[0] if pack_ids else DEFAULT_PACK_ID
     paths = get_pack_paths(primary_pack_id)
+    pack_dirs = {pack_id: get_pack_paths(pack_id)["pack_dir"] for pack_id in pack_ids}
 
     # Merge category mappings from all packs (primary takes precedence).
     merged_mapping = {}
@@ -236,6 +242,7 @@ def resolve_pack_context(
     return {
         "pack_id": primary_pack_id,
         "pack_ids": pack_ids,
+        "pack_dirs": pack_dirs,
         "pack_dir": paths["pack_dir"],
         "memes_dir": paths["memes_dir"],
         "metadata_path": paths["metadata_path"],

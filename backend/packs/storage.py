@@ -47,6 +47,7 @@ from .protocol import (
     validate_source_descriptor,
     validate_transfer_manifest,
 )
+from .resolver import _normalize_pack_ids
 
 PackOperationGuard = Callable[[str, str], None]
 InstallProgressCallback = Callable[[str, int, int | None], None]
@@ -353,9 +354,9 @@ def _current_default_pack_id() -> str:
     selection_rules = _load_selection_rules()
     for rule in reversed(selection_rules.get("rules", [])):
         if str(rule.get("scope") or "") == "default":
-            pack_id = str(rule.get("pack_id") or "").strip()
-            if pack_id:
-                return pack_id
+            pack_ids = _normalize_pack_ids(rule.get("pack_ids") or rule.get("pack_id"))
+            if pack_ids:
+                return pack_ids[0]
     return DEFAULT_PACK_ID
 
 
@@ -1465,22 +1466,36 @@ def uninstall_pack(
         next_default_pack_id = DEFAULT_PACK_ID
 
     normalized_rules = []
+    default_rule = None
     for rule in selection_rules.get("rules", []):
         if not isinstance(rule, dict):
             continue
         scope = str(rule.get("scope") or "").strip().lower()
-        rule_pack_id = str(rule.get("pack_id") or "").strip()
-        if not rule_pack_id or rule_pack_id == pack_id:
+        remaining_ids = [
+            candidate
+            for candidate in _normalize_pack_ids(
+                rule.get("pack_ids") or rule.get("pack_id")
+            )
+            if candidate != pack_id and candidate in existing_pack_ids
+        ]
+        if not remaining_ids:
             continue
+        normalized_rule = {**rule, "pack_id": remaining_ids[0]}
+        if "pack_ids" in rule:
+            normalized_rule["pack_ids"] = remaining_ids
         if scope == "default":
+            default_rule = normalized_rule
             continue
-        if not (PACKS_DIR / rule_pack_id).is_dir():
-            continue
-        normalized_rules.append(rule)
+        normalized_rules.append(normalized_rule)
 
-    normalized_rules.append(
-        {"id": "default", "scope": "default", "pack_id": next_default_pack_id}
-    )
+    if default_rule is None:
+        default_rule = {
+            "id": "default",
+            "scope": "default",
+            "pack_id": next_default_pack_id,
+        }
+    next_default_pack_id = default_rule["pack_id"]
+    normalized_rules.append(default_rule)
     selection_rules["rules"] = normalized_rules
     _save_selection_rules(selection_rules)
 
@@ -1843,24 +1858,33 @@ def _validate_and_normalize_rules(
 
         rule_id = str(rule.get("id") or "").strip()
         scope = str(rule.get("scope") or "").strip().lower()
-        pack_id = str(rule.get("pack_id") or "").strip()
+        pack_ids = _normalize_pack_ids(rule.get("pack_ids") or rule.get("pack_id"))
         target = str(rule.get("target") or "").strip()
 
         if not rule_id:
             raise ValueError(f"第 {index + 1} 条规则缺少 id")
         if scope not in {"persona", "session", "default"}:
             raise ValueError(f"第 {index + 1} 条规则 scope 非法")
-        if not pack_id:
+        if not pack_ids:
             raise ValueError(f"第 {index + 1} 条规则缺少 pack_id")
-        pack_exists = (
-            pack_id in available_pack_ids
-            if available_pack_ids is not None
-            else (PACKS_DIR / pack_id).is_dir()
-        )
-        if not pack_exists:
-            raise ValueError(f"第 {index + 1} 条规则引用的 pack 不存在: {pack_id}")
+        for pack_id in pack_ids:
+            if (
+                Path(pack_id).name != pack_id
+                or pack_id in {".", ".."}
+                or "\\" in pack_id
+            ):
+                raise ValueError(f"Invalid pack ID: {pack_id}")
+            pack_exists = (
+                pack_id in available_pack_ids
+                if available_pack_ids is not None
+                else (PACKS_DIR / pack_id).is_dir()
+            )
+            if not pack_exists:
+                raise ValueError(f"第 {index + 1} 条规则引用的 pack 不存在: {pack_id}")
 
-        normalized_rule = {"id": rule_id, "scope": scope, "pack_id": pack_id}
+        normalized_rule = {"id": rule_id, "scope": scope, "pack_id": pack_ids[0]}
+        if "pack_ids" in rule:
+            normalized_rule["pack_ids"] = pack_ids
         if scope in {"persona", "session"}:
             if not target:
                 raise ValueError(f"第 {index + 1} 条规则缺少 target")
