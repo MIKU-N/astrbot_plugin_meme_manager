@@ -79,17 +79,23 @@ async function initPluginConfig() {
       [["manual_review", "人工审核"]],
     ],
   ];
-  for (const [title, description, group, settings] of collectionSteps) {
+  for (const [index, [title, description, group, settings]] of collectionSteps.entries()) {
+    const stepNumber = index + 1;
     const item = document.createElement("li");
+    item.dataset.step = stepNumber;
     const node = document.createElement("div");
     node.className = "workflow-node collection-workflow-node";
+    const badge = document.createElement("div");
+    badge.className = "workflow-step-badge";
+    badge.textContent = stepNumber;
     const heading = document.createElement("strong");
     heading.textContent = title;
     const detail = document.createElement("span");
     detail.textContent = description;
-    node.append(heading, detail);
+    node.append(badge, heading, detail);
     const links = document.createElement("div");
     links.className = "collection-workflow-links";
+    links.dataset.step = stepNumber;
     for (const [path, label] of settings) {
       const button = document.createElement("button");
       button.type = "button";
@@ -611,30 +617,30 @@ async function initPluginConfig() {
         [["发送方式", ["delivery"]]],
       ];
       for (const [index, [title, description]] of workflows[mode].entries()) {
+        const stepNumber = index + 1;
         const item = document.createElement("li");
+        item.dataset.step = stepNumber;
         const row = document.createElement("div");
         row.className = "mode-workflow-row";
         const node = document.createElement("div");
         node.className = "workflow-node";
+        const badge = document.createElement("div");
+        badge.className = "workflow-step-badge";
+        badge.textContent = stepNumber;
         const label = document.createElement("strong");
         label.textContent = title;
         const detail = document.createElement("span");
         detail.textContent = description;
-        node.append(label, detail);
+        node.append(badge, label, detail);
         const branchList = document.createElement("div");
         branchList.className = "mode-workflow-branches";
         for (const [headingText, targetIds] of branches[index]) {
           if (!targetIds.length) continue;
           const branch = document.createElement("details");
           branch.className = "mode-workflow-branch";
-          branch.open = [
-            "触发与数量",
-            "当前模式",
-            "匹配与检索",
-            "不可用时的回退",
-            "发送方式",
-            "表情包使用规则",
-          ].includes(headingText);
+          branch.dataset.step = stepNumber;
+          // Always open all branches for better visibility
+          branch.open = true;
           const heading = document.createElement("summary");
           heading.textContent = headingText;
           const links = document.createElement("div");
