@@ -10,13 +10,12 @@ from typing import Any
 
 from astrbot.api import logger
 
-from .index import EmbeddingAdapter, search_index
+from .index import EmbeddingAdapter, index_is_ready, search_index
 from .models import REVIEW_CATEGORY, build_id_map, parse_meme_id
 from .storage import (
     file_sha256,
     load_metadata,
     safe_relative_path,
-    semantic_metadata_is_complete,
 )
 
 
@@ -59,21 +58,27 @@ async def search_memes_multi_pack(
             metadata = await asyncio.to_thread(load_metadata, pack_dir)
             if not metadata.get("images"):
                 continue
+            embedding = EmbeddingAdapter(resolve_embedding_provider(pack_id))
             if not await asyncio.to_thread(
-                semantic_metadata_is_complete,
-                pack_dir,
+                index_is_ready,
+                plugin_data_dir,
+                pack_id,
                 metadata,
-                require_embeddings=True,
+                embedding.provider_id,
+                embedding.model_name,
+                embedding.dimension,
+                allow_partial=True,
             ):
                 continue
             candidates = await search_index(
                 plugin_data_dir,
                 pack_id,
                 query,
-                EmbeddingAdapter(resolve_embedding_provider(pack_id)),
+                embedding,
                 metadata,
                 top_k=top_k,
                 min_score=min_score,
+                pack_dir=pack_dir,
             )
         except Exception:
             logger.warning("Semantic search failed for pack %s", pack_id, exc_info=True)
@@ -155,22 +160,31 @@ async def search_memes(
     metadata = load_metadata(pack_dir)
     if not metadata.get("images"):
         return {"ok": True, "candidates": [], "reason": "资源包没有语义元数据"}
-    if not _verified_complete and not semantic_metadata_is_complete(
-        pack_dir, metadata, require_embeddings=True
+    embedding = EmbeddingAdapter(embedding_provider)
+    if not _verified_complete and not await asyncio.to_thread(
+        index_is_ready,
+        plugin_data_dir,
+        pack_id,
+        metadata,
+        embedding.provider_id,
+        embedding.model_name,
+        embedding.dimension,
+        allow_partial=True,
     ):
         return {
             "ok": True,
             "candidates": [],
-            "reason": "资源包尚未完成100%语义化，不能作为语义检索目标",
+            "reason": "资源包没有可用的语义向量索引，请先进行增量处理或重建",
         }
     candidates = await search_index(
         plugin_data_dir,
         pack_id,
         query,
-        EmbeddingAdapter(embedding_provider),
+        embedding,
         metadata,
         top_k=top_k,
         min_score=min_score,
+        pack_dir=pack_dir,
     )
     for item in candidates:
         item.pop("content_sha256", None)

@@ -20,6 +20,9 @@ def png_bytes(color=(255, 0, 0)) -> bytes:
 
 
 class DummyMutationManager:
+    def assert_pack_mutation_allowed(self, _pack_id, _operation):
+        return None
+
     def begin_external_pack_operation(self, _pack_id, _operation):
         return None
 

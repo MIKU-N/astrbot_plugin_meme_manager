@@ -79,7 +79,10 @@ async function initPluginConfig() {
       [["manual_review", "人工审核"]],
     ],
   ];
-  for (const [index, [title, description, group, settings]] of collectionSteps.entries()) {
+  for (const [
+    index,
+    [title, description, group, settings],
+  ] of collectionSteps.entries()) {
     const stepNumber = index + 1;
     const item = document.createElement("li");
     item.dataset.step = stepNumber;
@@ -301,7 +304,10 @@ async function initPluginConfig() {
       title: "审核与入包",
       description:
         "开启后由你确认入包；关闭后仅新收集图片自动入包，已有待审核图片仍需处理。",
-      prefixes: ["auto_collect.manual_review"],
+      prefixes: [
+        "auto_collect.manual_review",
+        "semantic.auto_collect_embedding",
+      ],
     },
     {
       id: "storage",
@@ -742,6 +748,8 @@ async function initPluginConfig() {
       for (const row of card.querySelectorAll(".config-field")) {
         row.hidden =
           row.dataset.modeSwitch === "true" ||
+          (row.dataset.path === "semantic.auto_collect_embedding" &&
+            !semantic) ||
           (Boolean(query) && !row.dataset.search.includes(query));
         if (!row.hidden) matches++;
       }
@@ -873,6 +881,7 @@ async function initPluginConfig() {
       row.className = `config-field${
         field.type === "bool" ? " config-switch-field" : ""
       }${["text", "list"].includes(field.type) ? " config-field-wide" : ""}`;
+      row.dataset.path = field.path;
       row.dataset.modeSwitch = String(modePaths.includes(field.path));
       row.dataset.search = [
         labels[field.path] || field.label,

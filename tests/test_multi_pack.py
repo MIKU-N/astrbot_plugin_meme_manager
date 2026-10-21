@@ -176,7 +176,7 @@ def semantic_runtime(runtime, monkeypatch):
             }
         }
     monkeypatch.setattr(query, "load_metadata", lambda directory: metadata[directory])
-    monkeypatch.setattr(query, "semantic_metadata_is_complete", lambda *a, **k: True)
+    monkeypatch.setattr(query, "index_is_ready", lambda *a, **k: True)
 
     async def search_index(data_dir, pack_id, text, embedding, data, **kwargs):
         assert embedding.provider_id == pack_id
@@ -273,7 +273,7 @@ async def test_failed_primary_search_does_not_hide_secondary(semantic_runtime):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stage", ["load_metadata", "semantic_metadata_is_complete"])
+@pytest.mark.parametrize("stage", ["load_metadata", "index_is_ready"])
 async def test_primary_file_errors_do_not_abort_secondary_search(
     semantic_runtime, monkeypatch, stage
 ):
@@ -281,7 +281,8 @@ async def test_primary_file_errors_do_not_abort_secondary_search(
     original = getattr(query, stage)
 
     def fail_primary(directory, *args, **kwargs):
-        if directory.name == "pack-a":
+        pack_id = args[0] if stage == "index_is_ready" else directory.name
+        if pack_id == "pack-a":
             raise PermissionError("Image is temporarily inaccessible")
         return original(directory, *args, **kwargs)
 
@@ -291,7 +292,7 @@ async def test_primary_file_errors_do_not_abort_secondary_search(
 
 
 @pytest.mark.parametrize(
-    "stage", ["load_metadata", "semantic_metadata_is_complete", "index_is_ready"]
+    "stage", ["load_metadata", "index_is_ready"]
 )
 def test_primary_file_errors_do_not_abort_secondary_readiness(
     semantic_runtime, monkeypatch, stage

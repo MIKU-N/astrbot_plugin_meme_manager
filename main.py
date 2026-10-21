@@ -187,7 +187,14 @@ class MemeSender(Star, WebAPIMixin, CommandMixin, EventHandlerMixin):
         auto_collect_config = self._read_path(("auto_collect",), {})
         self.auto_collect_manager = AutoCollectManager(
             self,
-            auto_collect_config if isinstance(auto_collect_config, dict) else {},
+            {
+                **(
+                    auto_collect_config if isinstance(auto_collect_config, dict) else {}
+                ),
+                "auto_embedding": bool(
+                    self._read_path(("semantic", "auto_collect_embedding"), True)
+                ),
+            },
         )
 
         # 配置项
@@ -588,7 +595,7 @@ class MemeSender(Star, WebAPIMixin, CommandMixin, EventHandlerMixin):
             require_tool: 是否要求回复模型和请求公开语义检索工具。
 
         Returns:
-            至少一个表情包语义数据完整且对应索引就绪时返回 True。
+            True if a bound pack has valid vectors matching its embedding model.
         """
         if not self.semantic_enabled:
             return False
@@ -617,10 +624,6 @@ class MemeSender(Star, WebAPIMixin, CommandMixin, EventHandlerMixin):
             try:
                 pack_dir = get_pack_paths(pack_id)["pack_dir"]
                 metadata = load_metadata(pack_dir)
-                if not semantic_metadata_is_complete(
-                    pack_dir, metadata, require_embeddings=True
-                ):
-                    continue
                 provider = self._resolve_embedding_provider(pack_id)
                 embedding = EmbeddingAdapter(
                     provider, self.semantic_embedding_provider_id or ""
@@ -632,6 +635,7 @@ class MemeSender(Star, WebAPIMixin, CommandMixin, EventHandlerMixin):
                     embedding.provider_id,
                     embedding.model_name,
                     embedding.dimension,
+                    allow_partial=True,
                 ):
                     return True
             except Exception as exc:
