@@ -1,17 +1,14 @@
 import asyncio
 import copy
-import io
 import json
 import os
 import random
 import re
-import ssl
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
-import aiohttp
 from PIL import Image as PILImage
 
 from astrbot.api import logger
@@ -29,8 +26,12 @@ from ..backend.meme_parser.text_safety import (
     strip_internal_image_ref_lines,
 )
 from ..backend.packs.categories import resolve_safe_category_directory
-from ..backend.packs.images import IMAGE_EXTENSIONS
-from ..backend.packs.resolver import get_pack_paths
+from ..backend.packs.images import (
+    IMAGE_EXTENSIONS,
+    DuplicateEmojiError,
+    save_chat_upload_image,
+)
+from ..backend.packs.resolver import get_pack_paths, load_pack_category_mapping
 from ..backend.semantic.models import (
     REVIEW_CATEGORY,
     compact_semantic_query,
@@ -745,97 +746,332 @@ class EventHandlerMixin:
         }
 
     async def _handle_upload_image_impl(self, event: AstrMessageEvent):
+        """Save pending chat-upload images into the identified primary pack.
+
+        Args:
+            event: Event carrying the pending upload state and image components.
+
+        Yields:
+            One result chain summarizing saved, duplicate, failed, and
+            unprocessed counts together with any refresh warnings.
+        """
         user_key = f"{event.session_id}_{event.get_sender_id()}"
         upload_state = self.upload_states.get(user_key)
-        if not upload_state or time.time() > upload_state["expire_time"]:
-            if user_key in self.upload_states:
-                del self.upload_states[user_key]
+        try:
+            expired = time.time() > float(upload_state.get("expire_time") or 0)
+        except (AttributeError, TypeError, ValueError):
+            expired = True
+        if not upload_state or expired:
+            if self.upload_states.get(user_key) is upload_state:
+                self.upload_states.pop(user_key, None)
             return
+
         images = [c for c in event.message_obj.message if isinstance(c, Image)]
         if not images:
             yield event.plain_result("请发送图片文件来进行上传哦。")
             return
-        category = upload_state["category"]
+
+        category = str(upload_state.get("category") or "").strip()
         pack_id = str(upload_state.get("pack_id") or "").strip()
-        memes_dir = str(upload_state.get("memes_dir") or "").strip()
-        if not pack_id or not memes_dir:
-            pack_context = self._resolve_runtime_pack_context(event=event)
-            pack_id = str(pack_context.get("pack_id") or "").strip()
-            memes_dir = str(pack_context.get("memes_dir") or "").strip()
-        current_pack_id = str(
-            self._resolve_runtime_pack_context(event=event).get("pack_id") or ""
-        ).strip()
-        if current_pack_id != pack_id:
-            del self.upload_states[user_key]
-            yield event.plain_result("默认资源包已切换，请重新执行添加表情命令。")
+        recorded_memes_dir = str(upload_state.get("memes_dir") or "").strip()
+        state_label = f"主表情包「{pack_id or '未知'}」分类「{category or '未知'}」"
+        if not pack_id or not category or not recorded_memes_dir:
+            if self.upload_states.get(user_key) is upload_state:
+                self.upload_states.pop(user_key, None)
+            yield event.plain_result(
+                f"⚠️ {state_label}的上传状态无效，"
+                "请重新执行 /表情管理 添加表情 [类别名称]。"
+            )
             return
+
+        try:
+            pack_paths = get_pack_paths(pack_id)
+            pack_dir = Path(pack_paths["pack_dir"]).resolve()
+            canonical_memes_dir = Path(pack_paths["memes_dir"]).resolve()
+            recorded_path = Path(recorded_memes_dir).resolve()
+            if canonical_memes_dir == pack_dir:
+                raise ValueError("memes directory must be a child of the pack")
+            canonical_memes_dir.relative_to(pack_dir)
+        except (OSError, RuntimeError, ValueError):
+            pack_dir = None
+            canonical_memes_dir = None
+            recorded_path = None
+        if (
+            pack_dir is None
+            or canonical_memes_dir is None
+            or not pack_dir.is_dir()
+            or canonical_memes_dir != recorded_path
+        ):
+            if self.upload_states.get(user_key) is upload_state:
+                self.upload_states.pop(user_key, None)
+            yield event.plain_result(
+                f"⚠️ {state_label}的记录路径已失效，"
+                "请重新执行 /表情管理 添加表情 [类别名称]。"
+            )
+            return
+
         try:
             self.semantic_task_manager.begin_external_pack_operation(
                 pack_id, "接收并保存表情图片"
             )
         except RuntimeError as exc:
-            yield event.plain_result(f"⚠️ {exc}")
+            # Keep the pending state so the user can retry within its lifetime.
+            yield event.plain_result(
+                f"⚠️ {state_label}暂时无法写入：{exc}\n"
+                "上传请求仍然有效，请在30秒内重新发送图片重试。"
+            )
             return
-        save_dir = os.path.join(memes_dir, category)
-        try:
-            os.makedirs(save_dir, exist_ok=True)
-            saved_files = []
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-            for idx, img in enumerate(images, 1):
-                timestamp = int(time.time())
-                try:
-                    if "multimedia.nt.qq.com.cn" in img.url:
-                        insecure_url = img.url.replace("https://", "http://", 1)
-                        async with aiohttp.ClientSession() as session:
-                            async with session.get(insecure_url) as resp:
-                                content = await resp.read()
-                    else:
-                        async with aiohttp.ClientSession(
-                            connector=aiohttp.TCPConnector(ssl=ssl_context)
-                        ) as session:
-                            async with session.get(img.url) as resp:
-                                content = await resp.read()
+
+        saved_count = 0
+        duplicate_count = 0
+        failed_count = 0
+        unprocessed_count = 0
+        stop_note = ""
+        refresh_notes: list[str] = []
+
+        def route_problem() -> str:
+            # Re-resolve the captured primary pack and its memes root
+            # synchronously, after routing awaits, immediately before a write.
+            try:
+                current_paths = get_pack_paths(pack_id)
+                current_pack_dir = Path(current_paths["pack_dir"]).resolve()
+                current_memes_dir = Path(current_paths["memes_dir"]).resolve()
+                if current_memes_dir == current_pack_dir:
+                    raise ValueError("memes directory must be a child of the pack")
+                current_memes_dir.relative_to(current_pack_dir)
+                context = self._resolve_runtime_pack_context(event=event)
+                current_pack_id = str(context.get("pack_id") or "").strip()
+                routed_memes_dir = Path(str(context.get("memes_dir") or "")).resolve()
+            except Exception as exc:
+                logger.warning(
+                    "Chat upload could not re-resolve routing for pack %s category %s: %s",
+                    pack_id,
+                    category,
+                    exc,
+                )
+                return "无法确认当前主表情包"
+            if current_pack_id != pack_id:
+                return "主表情包在接收过程中发生了变化"
+            if routed_memes_dir != canonical_memes_dir:
+                return "主表情包路径在接收过程中发生了变化"
+            if current_pack_dir != pack_dir or current_memes_dir != canonical_memes_dir:
+                return "主表情包路径在接收过程中发生了变化"
+            return ""
+
+        async def category_problem() -> str:
+            try:
+                primary_mapping = await asyncio.to_thread(
+                    load_pack_category_mapping, pack_id
+                )
+                category_path = resolve_safe_category_directory(
+                    canonical_memes_dir, category
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Chat upload could not re-check category %s for pack %s: %s",
+                    category,
+                    pack_id,
+                    exc,
+                )
+                return "无法确认分类是否仍属于当前主表情包"
+            if category in primary_mapping or category_path.is_dir():
+                return ""
+            return "分类已被删除或不再属于当前主表情包"
+
+        async def commit_image(content: bytes, index: int) -> None:
+            nonlocal saved_count, duplicate_count, failed_count
+            try:
+                await asyncio.to_thread(
+                    save_chat_upload_image,
+                    canonical_memes_dir,
+                    category,
+                    content,
+                )
+                # Count only after the worker has completed the write.
+                saved_count += 1
+            except DuplicateEmojiError as exc:
+                duplicate_count += 1
+                logger.info(
+                    "Chat upload skipped duplicate in pack %s category %s: %s",
+                    pack_id,
+                    category,
+                    exc.existing_filename,
+                )
+            except Exception as exc:
+                failed_count += 1
+                logger.warning(
+                    "Chat upload image %s/%s could not be saved in pack %s "
+                    "category %s: %s",
+                    index + 1,
+                    len(images),
+                    pack_id,
+                    category,
+                    exc,
+                )
+
+        async def refresh_metadata() -> None:
+            try:
+                await asyncio.to_thread(invalidate_semantic_metadata, pack_dir)
+            except Exception as exc:
+                refresh_notes.append("语义元数据刷新失败，已保存的图片不受影响。")
+                logger.warning(
+                    "Chat upload saved images but semantic invalidation failed "
+                    "for pack %s: %s",
+                    pack_id,
+                    exc,
+                )
+            try:
+                await self.reload_emotions()
+            except Exception as exc:
+                refresh_notes.append("表情配置刷新失败，已保存的图片不受影响。")
+                logger.warning(
+                    "Chat upload saved images but emotion reload failed "
+                    "for pack %s: %s",
+                    pack_id,
+                    exc,
+                )
+
+        async def wait_for_worker(task: asyncio.Task) -> None:
+            """Finish a shielded worker before propagating cancellation.
+
+            Args:
+                task: Image commit or metadata refresh task holding the pack guard.
+
+            Returns:
+                None after the worker finishes.
+
+            Raises:
+                asyncio.CancelledError: Cancellation requested before completion;
+                    propagated only after the worker has finished.
+            """
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                # A write or refresh worker cannot be interrupted safely; keep
+                # the pack locked until it returns, then propagate cancellation.
+                while not task.done():
                     try:
-                        with PILImage.open(io.BytesIO(content)) as pil_img:
-                            file_type = pil_img.format.lower()
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        continue
                     except Exception:
-                        file_type = "unknown"
-                    ext_mapping = {
-                        "jpeg": ".jpg",
-                        "png": ".png",
-                        "gif": ".gif",
-                        "webp": ".webp",
-                    }
-                    ext = ext_mapping.get(file_type, ".bin")
-                    filename = f"{timestamp}_{idx}{ext}"
-                    save_path = os.path.join(save_dir, filename)
-                    with open(save_path, "wb") as f:
-                        f.write(content)
-                    saved_files.append(filename)
-                except Exception as e:
-                    logger.error(f"下载图片失败: {str(e)}")
-                    yield event.plain_result(f"文件 {img.url} 下载失败啦: {str(e)}")
-                    continue
-            del self.upload_states[user_key]
-            result_msg = [
-                Plain(
-                    f"✅ 已经成功收录了 {len(saved_files)} 张新表情到「{category}」图库！"
-                )
-            ]
-            if self.img_sync:
-                result_msg.append(
-                    Plain("\n☁️ 检测到已配置图床，如需同步到云端请使用命令：同步到云端")
-                )
-            yield event.chain_result(result_msg)
-            await self.reload_emotions()
-            if saved_files:
-                invalidate_semantic_metadata(Path(memes_dir).parent)
-        except Exception as e:
-            yield event.plain_result(f"保存失败了：{str(e)}")
+                        break
+                if task.done() and not task.cancelled():
+                    task.exception()
+                raise
+
+        try:
+            initial_problem = await category_problem()
+            if not initial_problem:
+                initial_problem = route_problem()
+            if initial_problem:
+                stop_note = initial_problem
+                unprocessed_count = len(images)
+            else:
+                for index, image in enumerate(images):
+                    try:
+                        local_path = Path(
+                            await asyncio.wait_for(
+                                image.convert_to_file_path(), timeout=30
+                            )
+                        )
+                        content = await asyncio.to_thread(local_path.read_bytes)
+                    except asyncio.TimeoutError:
+                        failed_count += 1
+                        logger.warning(
+                            "Chat upload image %s/%s timed out for pack %s category %s",
+                            index + 1,
+                            len(images),
+                            pack_id,
+                            category,
+                        )
+                        continue
+                    except Exception as exc:
+                        failed_count += 1
+                        logger.warning(
+                            "Chat upload image %s/%s could not be read for pack %s "
+                            "category %s: %s",
+                            index + 1,
+                            len(images),
+                            pack_id,
+                            category,
+                            exc,
+                        )
+                        continue
+
+                    problem = await category_problem()
+                    if not problem:
+                        problem = route_problem()
+                    if problem:
+                        stop_note = problem
+                        unprocessed_count = len(images) - index
+                        break
+                    await wait_for_worker(
+                        asyncio.create_task(commit_image(content, index))
+                    )
+
+        except Exception as exc:
+            logger.exception(
+                "Chat upload failed unexpectedly for pack %s category %s: %s",
+                pack_id,
+                category,
+                exc,
+            )
+            unprocessed_count = max(
+                unprocessed_count,
+                len(images) - saved_count - duplicate_count - failed_count,
+            )
+            stop_note = stop_note or "上传过程中发生内部错误，已保存的文件不受影响"
         finally:
-            self.semantic_task_manager.end_external_pack_operation(pack_id)
+            try:
+                if saved_count:
+                    # Refresh while the pack operation guard is still held; a
+                    # cancelled consumer must wait for the metadata worker.
+                    await wait_for_worker(asyncio.create_task(refresh_metadata()))
+            finally:
+                if self.upload_states.get(user_key) is upload_state:
+                    self.upload_states.pop(user_key, None)
+                self.semantic_task_manager.end_external_pack_operation(pack_id)
+
+        if saved_count and not failed_count and not stop_note:
+            if duplicate_count:
+                message = (
+                    f"✅ 已收录 {saved_count} 张新表情到{state_label}；"
+                    f"另有 {duplicate_count} 张重复图片未新增。"
+                )
+            else:
+                message = f"✅ 已经成功收录了 {saved_count} 张新表情到{state_label}！"
+        elif saved_count:
+            message = (
+                f"⚠️ 部分完成：{state_label}新增 {saved_count} 张，"
+                f"重复 {duplicate_count} 张，失败 {failed_count} 张。"
+            )
+        elif duplicate_count and not failed_count and not stop_note:
+            message = (
+                f"ℹ️ 未新增表情：{state_label}已有 {duplicate_count} 张相同图片，"
+                "未写入任何文件。"
+            )
+        elif stop_note:
+            message = (
+                f"❌ 未能写入：{state_label}新增 {saved_count} 张，"
+                f"重复 {duplicate_count} 张，失败 {failed_count} 张。"
+            )
+        else:
+            message = (
+                f"❌ 收录失败：{state_label}新增 {saved_count} 张，"
+                f"重复 {duplicate_count} 张，失败 {failed_count} 张。"
+            )
+        if stop_note:
+            message += (
+                f"\n⚠️ {stop_note}"
+                + (f"，剩余 {unprocessed_count} 张未处理" if unprocessed_count else "")
+                + f"；请重新执行 /表情管理 添加表情 [{category}]。"
+            )
+        for note in refresh_notes:
+            message += f"\n⚠️ {note}"
+        if saved_count and getattr(self, "img_sync", None):
+            message += "\n☁️ 检测到已配置图床，如需同步到云端请使用命令：同步到云端"
+        yield event.plain_result(message)
 
     async def _inject_meme_prompt_impl(
         self, event: AstrMessageEvent, req: ProviderRequest
