@@ -22,7 +22,13 @@ from .models import (
     text_hash,
     utc_now,
 )
-from .storage import file_sha256, load_metadata, safe_relative_path, save_metadata
+from .storage import (
+    file_sha256,
+    load_metadata,
+    refresh_metadata_inventory_snapshot,
+    safe_relative_path,
+    save_metadata,
+)
 
 INDEX_FORMAT = "faiss-indexflatip-v1"
 QUERY_CACHE_SIZE = 128
@@ -655,6 +661,9 @@ async def build_index(
         Returns:
             已写入磁盘的索引清单。
         """
+        # Validate the inventory before publishing a new index snapshot. A path
+        # enumeration failure must leave the previous manifest untouched.
+        refresh_metadata_inventory_snapshot(pack_dir, metadata)
         successful = [
             (digest, item)
             for digest, item in sorted(candidates)

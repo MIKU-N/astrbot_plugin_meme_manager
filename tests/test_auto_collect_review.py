@@ -9,7 +9,34 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from astrbot_plugin_meme_manager.backend import auto_collect
+from astrbot_plugin_meme_manager.backend.semantic import storage as semantic_storage
+from astrbot_plugin_meme_manager.backend.semantic.index import (
+    EmbeddingAdapter,
+    build_index,
+    index_is_ready,
+)
+from astrbot_plugin_meme_manager.backend.semantic.models import PROMPT_VERSION
+from astrbot_plugin_meme_manager.backend.semantic.task import SemanticTaskManager
 from test_auto_collect import DummyPlugin, png_bytes
+
+
+class Deterministic2DProvider:
+    provider_config = {"id": "test-embedding", "embedding_model": "deterministic-2d"}
+
+    @staticmethod
+    def get_dim():
+        return 2
+
+    @staticmethod
+    def _vector(text):
+        digest = hashlib.sha256(str(text).encode("utf-8")).digest()
+        return [float(digest[0] + 1), float(digest[1] + 1)]
+
+    def get_embedding(self, text):
+        return self._vector(text)
+
+    def get_embeddings(self, texts):
+        return [self._vector(text) for text in texts]
 
 
 class AutoCollectReviewTests(unittest.IsolatedAsyncioTestCase):
@@ -64,6 +91,20 @@ class AutoCollectReviewTests(unittest.IsolatedAsyncioTestCase):
         self.manager._classify = AsyncMock(return_value=decision)
         await self.manager._process_job(job)
         return f"{pack_id}:{digest}", job
+
+    def enrich_candidate(self, record_id, caption, tags):
+        path = auto_collect.AUTO_COLLECT_INBOX_METADATA_PATH
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+        metadata["items"][record_id]["classification"].update(
+            {
+                "caption": caption,
+                "tags": tags,
+                "semantic_prompt_version": PROMPT_VERSION,
+                "semantic_category": "happy",
+                "vision_model": "test-vision",
+            }
+        )
+        path.write_text(json.dumps(metadata), encoding="utf-8")
 
     async def test_override_category_and_failed_semantic_write_retains_pending(self):
         record_id, _ = await self.add_candidate()
@@ -134,6 +175,102 @@ class AutoCollectReviewTests(unittest.IsolatedAsyncioTestCase):
             "pack-a", force=False
         )
         self.assertFalse(self.manager._embedding_tasks)
+
+    async def test_collection_acceptance_lifecycle_with_real_faiss_and_retry(self):
+        blue_id, _ = await self.add_candidate((0, 0, 255))
+        green_id, _ = await self.add_candidate((0, 255, 0))
+        red_id, _ = await self.add_candidate((255, 0, 0))
+        self.enrich_candidate(blue_id, "Blue duplicate", ["blue"])
+        self.enrich_candidate(green_id, "Green success", ["green"])
+        self.enrich_candidate(red_id, "Red failure", ["red"])
+
+        pack_dir = self.packs / "pack-a"
+        blue_path = pack_dir / "memes" / "happy" / "seed-blue.png"
+        blue_path.write_bytes(
+            self.manager.pending_image_path("pack-a", blue_id).read_bytes()
+        )
+        semantic_storage.save_collected_image_semantic(
+            pack_dir,
+            blue_path,
+            {
+                "caption": "Blue duplicate",
+                "tags": ["blue"],
+                "semantic_prompt_version": PROMPT_VERSION,
+                "semantic_category": "happy",
+                "vision_model": "test-vision",
+            },
+            manual_confirmed=True,
+        )
+
+        runtime = self.root / "runtime"
+        embedding = EmbeddingAdapter(Deterministic2DProvider())
+        await build_index(pack_dir, runtime, "pack-a", embedding)
+        tasks = SemanticTaskManager(runtime)
+        tasks._pack_dir = lambda pack_id: self.packs / pack_id
+        tasks._require_embedding_provider = lambda *args: embedding
+        tasks._verify_embedding_dimension = AsyncMock()
+        self.plugin.semantic_task_manager = tasks
+        self.plugin.semantic_enabled = True
+
+        real_save = auto_collect.save_collected_image_semantic
+
+        def flaky_save(target_pack_dir, image_path, decision, **kwargs):
+            if decision.get("caption") == "Red failure":
+                raise OSError("metadata write failed")
+            return real_save(target_pack_dir, image_path, decision, **kwargs)
+
+        with patch.object(
+            auto_collect, "save_collected_image_semantic", side_effect=flaky_save
+        ):
+            result = await self.manager.accept_pending(
+                "pack-a",
+                [{"id": blue_id}, {"id": green_id}, {"id": red_id}],
+            )
+
+        self.assertEqual(result, {"imported": 1, "duplicates": 1, "failed": 1})
+        pending_items = (await self.manager.pending_status("pack-a"))["items"]
+        self.assertEqual([item["id"] for item in pending_items], [red_id])
+        self.assertEqual(len(list((pack_dir / "memes").rglob("*.png"))), 2)
+        metadata = semantic_storage.load_metadata(pack_dir)
+        self.assertEqual(len(metadata["images"]), 2)
+        self.assertEqual(metadata["file_total"], 2)
+        self.assertEqual(metadata["unique_total"], 2)
+        self.assertEqual(
+            sorted(item["caption"] for item in metadata["images"].values()),
+            ["Blue duplicate", "Green success"],
+        )
+
+        await asyncio.wait_for(self.manager._embedding_tasks["pack-a"], 10)
+        self.assertNotIn("pack-a", self.manager._embedding_tasks)
+        metadata = semantic_storage.load_metadata(pack_dir)
+        self.assertTrue(index_is_ready(runtime, "pack-a", metadata))
+        for summary in (
+            semantic_storage.get_pack_semantic_summary(pack_dir, verify_files=False),
+            semantic_storage.get_pack_semantic_summary(pack_dir),
+        ):
+            self.assertEqual(summary["semantic_status"], "complete")
+            self.assertTrue(summary["semantic_snapshot_matches"])
+            self.assertFalse(summary["semantic_files_changed"])
+            self.assertEqual(summary["semantic_caption_total"], 2)
+
+        result = await self.manager.accept_pending("pack-a", [{"id": red_id}])
+        self.assertEqual(result, {"imported": 1, "duplicates": 0, "failed": 0})
+        await asyncio.wait_for(self.manager._embedding_tasks["pack-a"], 10)
+        self.assertNotIn("pack-a", self.manager._embedding_tasks)
+
+        metadata = semantic_storage.load_metadata(pack_dir)
+        self.assertEqual(len(metadata["images"]), 3)
+        self.assertEqual(metadata["file_total"], 3)
+        self.assertEqual(metadata["unique_total"], 3)
+        self.assertTrue(index_is_ready(runtime, "pack-a", metadata))
+        for summary in (
+            semantic_storage.get_pack_semantic_summary(pack_dir, verify_files=False),
+            semantic_storage.get_pack_semantic_summary(pack_dir),
+        ):
+            self.assertEqual(summary["semantic_status"], "complete")
+            self.assertEqual(summary["semantic_caption_done"], 3)
+            self.assertEqual(summary["semantic_caption_total"], 3)
+            self.assertEqual(summary["semantic_file_total"], 3)
 
     async def test_vector_setting_can_disable_automatic_generation(self):
         self.plugin.semantic_enabled = True
