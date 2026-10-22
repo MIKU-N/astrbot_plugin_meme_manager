@@ -136,6 +136,8 @@ async def send_in_two_steps(context, event, chain: MessageChain):
 
 图床教程位于 `pages/app/settings/index.html`，交互入口在 `storage-guide.js`；更新教程时核对实际配置字段及服务商官方说明，避免写死套餐额度。
 
+主题颜色统一定义在 `pages/app/shared/ui.css`，各页使用语义变量设置背景、文字、边框和状态色。AstrBot 在加载页面和切换主题时更新根元素的 `data-theme="light/dark"`；没有该属性时才跟随系统的深浅色偏好。实心主按钮使用 `--primary` / `--on-primary`，链接使用 `--link`，成功、警告和错误使用各自独立的状态变量。修改颜色时同时检查普通、悬停、禁用和弹窗状态，图片资源保持原色。
+
 本地界面预览：
 
 ```sh

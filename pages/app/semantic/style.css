@@ -51,10 +51,10 @@
 }
 .control-panel .result.warning {
   white-space: pre-wrap;
-  color: #926321;
+  color: var(--warning-fg);
 }
 .auto-inbox-panel {
-  border-color: #e5daba;
+  border-color: var(--warning-border);
 }
 .auto-inbox-panel h2 {
   display: flex;
@@ -72,9 +72,9 @@
   display: grid;
   gap: 6px;
   padding: 12px 14px;
-  border: 1px solid #ece5d6;
+  border: 1px solid var(--warning-border);
   border-radius: 12px;
-  background: #fdfcf8;
+  background: var(--warning-bg);
 }
 .auto-inbox-item span,
 .auto-inbox-item time {
@@ -103,8 +103,8 @@
   margin-top: 16px;
   padding: 12px 14px;
   border-radius: 10px;
-  background: #fff3f0;
-  color: var(--danger);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
   font-size: 13px;
   line-height: 1.6;
   overflow-wrap: anywhere;
@@ -133,11 +133,11 @@
   border: 0;
   border-radius: 999px;
   overflow: hidden;
-  background: #edf3ef;
+  background: var(--surface-muted);
   accent-color: var(--brand);
 }
 #task-progress::-webkit-progress-bar {
-  background: #edf3ef;
+  background: var(--surface-muted);
   border-radius: 999px;
 }
 #task-progress::-webkit-progress-value {
@@ -178,7 +178,7 @@
   min-width: 0;
   padding: 12px;
   border-radius: 8px;
-  background: #f7faf8;
+  background: var(--surface-inset);
 }
 .metric span {
   display: block;
@@ -240,8 +240,8 @@
   margin-top: 8px;
   padding: 6px 8px;
   border-radius: 6px;
-  background: #eef5f0;
-  color: var(--brand-strong);
+  background: var(--primary-soft);
+  color: var(--link);
 }
 .record-preview-button {
   width: 88px;
@@ -250,12 +250,13 @@
   border: 1px solid var(--line);
   border-radius: 10px;
   overflow: hidden;
-  background: #f7faf8;
+  background: var(--surface-inset);
   color: var(--muted);
 }
 .record-preview-button:hover:not(:disabled) {
   transform: none;
   border-color: var(--brand);
+  background: var(--surface-hover);
 }
 .record-preview-button img {
   width: 100%;
@@ -307,7 +308,7 @@
   max-height: calc(94vh - 120px);
   overflow: auto;
   border-radius: 10px;
-  background: #f3f6f4;
+  background: var(--surface-inset);
 }
 .image-preview-stage img {
   display: block;
@@ -322,7 +323,7 @@
   position: absolute;
   padding: 8px 12px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.92);
+  background: var(--surface-glass);
   color: var(--muted);
   font-size: 13px;
 }

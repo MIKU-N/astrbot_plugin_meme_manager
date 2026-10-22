@@ -6608,7 +6608,7 @@ async function initApp() {
     statusDiv.innerHTML = "";
 
     const errorText = document.createElement("p");
-    errorText.style.color = "red";
+    errorText.style.color = "var(--danger-fg)";
     errorText.textContent = `检查同步状态失败: ${message}`;
     statusDiv.appendChild(errorText);
 
