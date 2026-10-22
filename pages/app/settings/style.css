@@ -16,6 +16,25 @@
   position: sticky;
   top: var(--space-24);
   padding: var(--space-4) 0;
+  isolation: isolate;
+}
+.settings-sidebar::before {
+  content: "";
+  position: absolute;
+  inset: calc(-1 * var(--space-8)) calc(-1 * var(--space-12));
+  z-index: -1;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-elevated);
+  box-shadow: var(--shadow-sm);
+}
+@supports ((backdrop-filter: blur(16px)) or (-webkit-backdrop-filter: blur(16px))) {
+  .settings-sidebar::before {
+    background: var(--surface-glass);
+    box-shadow: var(--shadow-glass);
+    backdrop-filter: blur(var(--glass-blur));
+    -webkit-backdrop-filter: blur(var(--glass-blur));
+  }
 }
 
 .settings-search {
@@ -571,6 +590,7 @@ button.workflow-node:focus-visible {
   color: var(--brand-strong);
   border: 1px solid var(--border-muted);
   background: var(--surface-elevated);
+  box-shadow: none;
   font-size: var(--font-caption);
   line-height: 1.5;
   white-space: normal;
@@ -673,17 +693,27 @@ button.workflow-node:focus-visible {
   padding: var(--space-16);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
+  background: var(--surface-elevated);
   cursor: pointer;
-  transition: var(--transition);
+  transition:
+    background-color var(--motion),
+    border-color var(--motion),
+    box-shadow var(--motion),
+    transform var(--motion);
 }
 
 .selection-mode-card:hover {
   border-color: var(--primary-border-strong);
+  background: var(--primary-soft);
+  box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
 }
 
 .selection-mode-card.selected {
   border-color: var(--primary);
   background: var(--primary-soft);
+  box-shadow: none;
+  transform: none;
 }
 
 .selection-mode-card:focus-within {
@@ -948,7 +978,8 @@ button.workflow-node:focus-visible {
     padding: 0 16px 30px;
   }
   .settings-sidebar {
-    position: static;
+    position: relative;
+    top: auto;
     padding: 0;
     min-width: 0;
   }
@@ -1013,6 +1044,9 @@ button.workflow-node:focus-visible {
   .config-switch::before {
     transition: none;
   }
+  .selection-mode-card:hover {
+    transform: none;
+  }
 }
 
 .rules-list {
@@ -1063,6 +1097,7 @@ button.workflow-node:focus-visible {
   border-radius: var(--radius-sm);
   background: var(--surface-hover);
   color: var(--text-muted);
+  box-shadow: none;
   font-size: var(--font-caption);
   cursor: grab;
 }
@@ -1254,7 +1289,16 @@ button.drag-handle:hover {
   padding: var(--space-8) var(--space-12);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
+  background: var(--surface-elevated);
   cursor: pointer;
+  transition:
+    background-color var(--motion),
+    border-color var(--motion);
+}
+
+.export-mode-option:hover {
+  border-color: var(--primary-border-strong);
+  background: var(--primary-soft);
 }
 
 .export-mode-option input {
@@ -1295,10 +1339,13 @@ button.drag-handle:hover {
   gap: var(--space-12);
   align-items: center;
   padding: var(--space-12);
-  border: 1px dashed var(--primary-border-strong);
+  border: 1px dashed var(--border-strong);
   border-radius: var(--radius-md);
   background: var(--surface-inset);
   cursor: pointer;
+  transition:
+    background-color var(--motion),
+    border-color var(--motion);
 }
 
 .pack-import-dropzone input {
@@ -1306,8 +1353,8 @@ button.drag-handle:hover {
 }
 
 .pack-import-dropzone.dragover {
-  border-color: var(--accent);
-  background: var(--info-bg);
+  border-color: var(--primary);
+  background: var(--primary-soft);
 }
 
 .pack-import-dropzone.checking {

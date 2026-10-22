@@ -251,7 +251,8 @@
   border-radius: var(--radius-md);
   overflow: hidden;
   background: var(--surface-inset);
-  color: var(--muted);
+  color: var(--text-muted);
+  box-shadow: none;
 }
 .record-preview-button:hover:not(:disabled) {
   transform: none;
@@ -319,8 +320,8 @@
   position: absolute;
   padding: var(--space-8) var(--space-12);
   border-radius: var(--radius-sm);
-  background: var(--surface-glass);
-  color: var(--muted);
+  background: var(--surface-elevated);
+  color: var(--text-muted);
   font-size: var(--font-label);
 }
 #image-preview-retry {
