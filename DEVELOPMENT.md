@@ -136,13 +136,19 @@ async def send_in_two_steps(context, event, chain: MessageChain):
 
 图床教程位于 `pages/app/settings/index.html`，交互入口在 `storage-guide.js`；更新教程时核对实际配置字段及服务商官方说明，避免写死套餐额度。
 
+主题颜色统一定义在 `pages/app/shared/ui.css`，各页使用语义变量设置背景、文字、边框和状态色。AstrBot 在加载页面和切换主题时更新根元素的 `data-theme="light/dark"`；没有该属性时才跟随系统的深浅色偏好。实心主按钮使用 `--primary` / `--on-primary`，链接使用 `--link`，成功、警告和错误使用各自独立的状态变量。修改颜色时同时检查普通、悬停、禁用和弹窗状态，图片资源保持原色。
+
+公共层同时维护间距、圆角、字号和控件尺寸：间距使用 `--space-4` 至 `--space-32` 的既有档位；常规控件 40px、紧凑控件 32px、触控目标至少 44px。页面主标题、分区标题和卡片标题分别使用 `--font-title`、`--font-subtitle` 和 `--font-section`。按钮外观优先使用公共主按钮及 `secondary`、`ghost`、`danger`，紧凑尺寸使用 `compact`，图标按钮使用 `icon-button`。页面样式只补充业务布局和确有必要的状态，不再通过全局 `button` 或末尾覆盖块重定义公共外观。
+
+原生弹窗使用 `ui-dialog`，标题使用 `ui-dialog-title`。包含独立头部和底部的弹窗额外使用 `ui-dialog-sectioned`，头部和底部使用 `ui-dialog-heading`、`ui-dialog-actions`；页面特例应限定在对应弹窗内。清理旧样式时同时核对 HTML、脚本生成的 DOM 和动态状态类，保留加载、审核、拖拽及移动端抽屉行为。
+
 本地界面预览：
 
 ```sh
 node tests/frontend/preview.mjs
 ```
 
-预览使用模拟接口，仅用于布局和交互检查，不能代替真实 AstrBot 联调。
+预览使用模拟接口，仅用于布局和交互检查，不能代替真实 AstrBot 联调。URL 可添加 `?theme=light` 或 `?theme=dark` 模拟宿主的初始主题，预览工具中的按钮可以实时切换深浅色；这些控件仅存在于模拟预览中。
 
 ## Python 验证
 
