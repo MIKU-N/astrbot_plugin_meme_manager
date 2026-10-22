@@ -72,7 +72,7 @@ const confirmMask = document.createElement("div");
 confirmMask.className = "dialog-mask ui-confirm-mask hidden";
 confirmMask.setAttribute("aria-hidden", "true");
 confirmMask.innerHTML = `<section class="dialog-card" role="dialog" aria-modal="true" aria-labelledby="ui-confirm-title" aria-describedby="ui-confirm-message">
-  <h3 id="ui-confirm-title" class="text-h3 pa-4 pb-0 pl-6"></h3>
+  <h3 id="ui-confirm-title" class="ui-dialog-title text-h3 pa-4 pb-0 pl-6"></h3>
   <p id="ui-confirm-message" class="dialog-message"></p>
   <div class="dialog-actions"><button type="button" id="ui-confirm-cancel" class="ghost" variant="text">取消</button><button type="button" id="ui-confirm-accept" variant="tonal">确认</button></div>
 </section>`;

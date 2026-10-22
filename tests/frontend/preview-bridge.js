@@ -5,7 +5,25 @@
     const label = document.createElement("div");
     label.textContent = "界面预览（模拟数据）";
     label.style.cssText =
-      "position:fixed;bottom:10px;left:12px;z-index:15000;padding:4px 9px;border:1px solid #dce8e2;border-radius:6px;background:#fff;color:#657a72;font:11px sans-serif;pointer-events:none";
+      "position:fixed;bottom:10px;left:12px;z-index:15000;display:flex;align-items:center;gap:8px;padding:4px 9px;border:1px solid var(--border);border-radius:8px;background:var(--surface-elevated);color:var(--text-muted);font:12px sans-serif";
+    label.setAttribute("aria-label", "界面预览工具");
+    for (const [theme, text] of [["light", "浅色预览"], ["dark", "深色预览"]]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "ghost compact";
+      button.textContent = text;
+      button.addEventListener("click", () => {
+        document.documentElement.dataset.theme = theme;
+        const url = new URL(location.href);
+        url.searchParams.set("theme", theme);
+        history.replaceState(null, "", url);
+        for (const control of label.querySelectorAll("button")) {
+          control.setAttribute("aria-pressed", String(control === button));
+        }
+      });
+      button.setAttribute("aria-pressed", String(document.documentElement.dataset.theme === theme));
+      label.append(button);
+    }
     document.body.append(label);
   });
   const packs = [
