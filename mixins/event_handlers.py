@@ -21,6 +21,7 @@ from astrbot.api.message_components import *
 from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.core.message.components import Image, Plain
 from astrbot.core.message.message_event_result import MessageChain, ResultContentType
+from astrbot.core.platform.message_type import MessageType
 
 from ..backend.meme_parser import MemeParser
 from ..backend.meme_parser.text_safety import (
@@ -1549,9 +1550,26 @@ class EventHandlerMixin:
 
     async def _send_meme_image(self, event: AstrMessageEvent, image: Image) -> None:
         image = await self._ensure_image_send_format(image)
-        if event.get_platform_name() in {"gewechat", "webchat"}:
+        platform_name = event.get_platform_name()
+        if platform_name in {"gewechat", "webchat"}:
             await event.send(MessageChain([image]))
             return
+        if (
+            platform_name == "qq_official"
+            and event.get_message_type() == MessageType.GROUP_MESSAGE
+        ):
+            raw_message = getattr(
+                getattr(event, "message_obj", None), "raw_message", None
+            )
+            try:
+                from botpy.message import GroupMessage
+            except ImportError:
+                pass
+            else:
+                # QQ group image replies must reuse the triggering message context.
+                if isinstance(raw_message, GroupMessage):
+                    await event.send(MessageChain([image]))
+                    return
         await self.context.send_message(event.unified_msg_origin, MessageChain([image]))
 
     async def _ensure_image_send_format(self, image: Image) -> Image:
