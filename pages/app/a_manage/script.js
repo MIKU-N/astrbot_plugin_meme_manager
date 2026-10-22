@@ -782,7 +782,10 @@ async function initApp() {
   let managePacksById = new Map();
   let pendingPackImportToken = "";
   let exportCapabilityRequestId = 0;
+  let exportCapabilityPackId = "";
+  let exportDownloadInFlight = false;
   let managePackVectorStatusRequestId = 0;
+  let managePackSummaryRequestId = 0;
   let managePageActive = true;
   let vectorStatusPollInFlight = false;
   const vectorOperations = new Set();
@@ -938,7 +941,7 @@ async function initApp() {
       option?.classList.toggle("selected", input.checked);
       option?.classList.toggle("disabled", input.disabled);
     });
-    if (exportPackDownloadBtn) {
+    if (exportPackDownloadBtn && !exportDownloadInFlight) {
       exportPackDownloadBtn.innerHTML =
         selectedExportMode() === "backup"
           ? '<i class="fas fa-download icon"></i>下载自用备份'
@@ -948,8 +951,21 @@ async function initApp() {
 
   async function refreshPackExportCapability(packId = activeManagePackId) {
     const normalizedPackId = String(packId || "").trim();
+    if (
+      !managePageActive ||
+      exportDownloadInFlight ||
+      normalizedPackId !== String(activeManagePackId || "").trim()
+    ) {
+      return;
+    }
     const requestId = ++exportCapabilityRequestId;
     const pack = managePacksById.get(normalizedPackId);
+    const samePack = normalizedPackId === exportCapabilityPackId;
+    const isCurrentRequest = () =>
+      requestId === exportCapabilityRequestId &&
+      !exportDownloadInFlight &&
+      managePageActive &&
+      normalizedPackId === String(activeManagePackId || "").trim();
     if (transferCurrentPack) {
       transferCurrentPack.textContent = pack
         ? `当前：${pack.name || pack.id}（${Number(pack.image_count || 0)} 张）`
@@ -958,6 +974,7 @@ async function initApp() {
           : "暂无可导出的表情包";
     }
     if (!normalizedPackId) {
+      exportCapabilityPackId = "";
       if (exportPackDownloadBtn) exportPackDownloadBtn.disabled = true;
       if (exportModeBackup) exportModeBackup.disabled = true;
       if (vectorBackupHint)
@@ -966,14 +983,16 @@ async function initApp() {
       return;
     }
 
-    if (exportPackDownloadBtn) exportPackDownloadBtn.disabled = false;
-    if (exportModeBackup) {
-      if (exportModeBackup.checked) {
-        const shareInput = document.getElementById("export-mode-share");
-        if (shareInput) shareInput.checked = true;
-      }
-      exportModeBackup.disabled = true;
+    if (!samePack) {
+      // A backup selection belongs to one pack; reset new packs to share.
+      exportCapabilityPackId = normalizedPackId;
+      const shareInput = document.getElementById("export-mode-share");
+      if (shareInput) shareInput.checked = true;
     }
+    // Capability is unknown while loading: block backup and its download path.
+    if (exportModeBackup) exportModeBackup.disabled = true;
+    if (exportPackDownloadBtn)
+      exportPackDownloadBtn.disabled = Boolean(exportModeBackup?.checked);
     if (vectorBackupHint)
       vectorBackupHint.textContent = "正在检查当前表情包的向量状态…";
     updateExportModeAppearance();
@@ -981,7 +1000,7 @@ async function initApp() {
       const status = await apiGet("packs/export/status", {
         pack_id: normalizedPackId,
       });
-      if (requestId !== exportCapabilityRequestId) {
+      if (!isCurrentRequest()) {
         return;
       }
       const available = Boolean(status?.vector_backup_available);
@@ -990,6 +1009,7 @@ async function initApp() {
         const shareInput = document.getElementById("export-mode-share");
         if (shareInput) shareInput.checked = true;
       }
+      if (exportPackDownloadBtn) exportPackDownloadBtn.disabled = false;
       if (vectorBackupHint) {
         const modelHint = [
           String(status?.embedding_model || "").trim(),
@@ -1006,27 +1026,37 @@ async function initApp() {
           : "当前没有完整向量；完成语义化并建立索引后才可导出。";
       }
     } catch (error) {
-      if (requestId !== exportCapabilityRequestId) {
+      if (!isCurrentRequest()) {
         return;
       }
       if (exportModeBackup) exportModeBackup.disabled = true;
+      const shareInput = document.getElementById("export-mode-share");
+      if (shareInput) shareInput.checked = true;
+      if (exportPackDownloadBtn) exportPackDownloadBtn.disabled = false;
       if (vectorBackupHint) {
         vectorBackupHint.textContent = "暂时无法读取向量状态，请稍后重试。";
       }
     } finally {
-      if (requestId === exportCapabilityRequestId) {
+      if (isCurrentRequest()) {
         updateExportModeAppearance();
       }
     }
   }
 
   async function downloadCurrentPack() {
+    if (exportDownloadInFlight) return;
     const packId = String(activeManagePackId || "").trim();
     if (!packId) {
       showToast("当前没有可导出的表情包。", "warning", "无法导出");
       return;
     }
     const mode = selectedExportMode();
+    if (mode === "backup" && exportModeBackup?.disabled) {
+      showToast("当前表情包暂无可用向量备份。", "warning", "无法导出");
+      return;
+    }
+    exportDownloadInFlight = true;
+    exportCapabilityRequestId += 1;
     setButtonBusy(exportPackDownloadBtn, "正在生成压缩包…");
     setPackTransferResult(
       exportPackResult,
@@ -1053,8 +1083,10 @@ async function initApp() {
       );
       showToast(error?.message || String(error), "error", "导出失败");
     } finally {
+      exportDownloadInFlight = false;
       restoreButton(exportPackDownloadBtn);
       updateExportModeAppearance();
+      await refreshPackExportCapability(activeManagePackId);
     }
   }
 
@@ -1647,8 +1679,12 @@ async function initApp() {
   }
 
   async function refreshManagePackSummaries() {
+    const requestId = ++managePackSummaryRequestId;
     try {
       const response = await apiGet("packs");
+      if (requestId !== managePackSummaryRequestId || !managePageActive) {
+        return [];
+      }
       const packs = Array.isArray(response?.packs) ? response.packs : [];
       managePacksById = new Map(
         packs.map((pack) => [String(pack?.id || "").trim(), pack]),
@@ -1660,9 +1696,10 @@ async function initApp() {
         }
       });
       updateManagePackSemanticAppearance(activeManagePackId);
+      const selectedPackId = activeManagePackId;
       await Promise.all([
-        refreshPackExportCapability(activeManagePackId),
-        refreshManagePackVectorStatus(activeManagePackId),
+        refreshPackExportCapability(selectedPackId),
+        refreshManagePackVectorStatus(selectedPackId),
       ]);
       return packs;
     } catch (error) {
@@ -7002,6 +7039,8 @@ async function initApp() {
   window.addEventListener("pagehide", () => {
     managePageActive = false;
     managePackVectorStatusRequestId++;
+    managePackSummaryRequestId++;
+    exportCapabilityRequestId++;
   });
   window.addEventListener("pageshow", () => {
     managePageActive = true;
@@ -7024,9 +7063,9 @@ async function initApp() {
     ) {
       vectorStatusPollInFlight = true;
       try {
-        await refreshManagePackVectorStatus(activeManagePackId);
+        await refreshManagePackSummaries();
       } catch (error) {
-        console.warn("Failed to refresh vector status", error);
+        console.warn("Failed to refresh pack summaries", error);
       } finally {
         vectorStatusPollInFlight = false;
       }

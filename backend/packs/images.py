@@ -1,17 +1,27 @@
 import asyncio
 import hashlib
+import io
 import os
 import shutil
+import tempfile
+import uuid
 from pathlib import Path
 
+from PIL import Image as PILImage
 from werkzeug.utils import secure_filename
 
 from astrbot.api import logger
 
-from .categories import is_safe_category_name
+from .categories import is_safe_category_name, resolve_safe_category_directory
 from .resolver import resolve_pack_context
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+CHAT_UPLOAD_EXTENSIONS = {
+    "JPEG": ".jpg",
+    "PNG": ".png",
+    "GIF": ".gif",
+    "WEBP": ".webp",
+}
 
 
 def _get_memes_root() -> Path:
@@ -95,6 +105,114 @@ def _build_available_file_path(category_path: Path, filename: str) -> Path:
         if not candidate.exists():
             return candidate
         index += 1
+
+
+def save_chat_upload_image(
+    memes_root: str | Path,
+    category: str,
+    content: bytes,
+) -> dict[str, str]:
+    """Atomically save original chat-upload bytes into an explicit pack category.
+
+    The caller owns routing and category authorization. This routine works only
+    with the supplied ``memes_root`` and never resolves the global default pack,
+    so a changed runtime selection cannot redirect the write.
+
+    Args:
+        memes_root: Canonical ``memes`` directory of the destination pack.
+        category: Single path-segment category already accepted by that pack.
+        content: Original image bytes; animation frames are preserved verbatim.
+
+    Returns:
+        Dictionary containing the saved absolute path and final filename.
+
+    Raises:
+        DuplicateEmojiError: The same category already holds identical bytes.
+        ValueError: Content is empty, corrupt, unsupported, or the category is
+            unsafe or escapes the pack directory.
+        OSError: The image could not be written atomically.
+    """
+    if not content:
+        raise ValueError("上传图片内容为空")
+
+    # Validate before creating a directory so rejected bytes leave no category.
+    try:
+        with PILImage.open(io.BytesIO(content)) as image:
+            image_format = str(image.format or "").upper()
+            image.verify()
+        # verify() accepts some truncated JPEG payloads, so decode the first
+        # frame from the original bytes without re-encoding or altering them.
+        with PILImage.open(io.BytesIO(content)) as image:
+            image.load()
+    except Exception as exc:
+        raise ValueError("上传内容不是有效图片") from exc
+    extension = CHAT_UPLOAD_EXTENSIONS.get(image_format)
+    if not extension:
+        raise ValueError(f"不支持的表情图片格式: {image_format or 'unknown'}")
+
+    root = Path(memes_root).resolve()
+    category_path = resolve_safe_category_directory(root, category)
+    if category_path.is_dir():
+        duplicate_path = _find_duplicate_image(
+            category_path, _calculate_file_hash(content)
+        )
+        if duplicate_path is not None:
+            raise DuplicateEmojiError(duplicate_path.name)
+
+    # A configured category may legitimately have no directory yet. Re-resolve
+    # after creation so a symlink introduced meanwhile cannot escape the pack.
+    category_path.mkdir(parents=True, exist_ok=True)
+    category_path = category_path.resolve()
+    try:
+        category_path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("分类目录逃逸表情目录") from exc
+    if not category_path.is_dir():
+        raise OSError("分类目录不可用")
+
+    filename = f"{uuid.uuid4().hex}{extension}"
+    temp_path: Path | None = None
+    created_target: Path | None = None
+    completed = False
+    try:
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{filename}.", suffix=".tmp", dir=category_path
+        )
+        temp_path = Path(temp_name)
+        with os.fdopen(fd, "wb") as file_obj:
+            file_obj.write(content)
+            file_obj.flush()
+            os.fsync(file_obj.fileno())
+
+        while True:
+            file_path = _build_available_file_path(category_path, filename)
+            try:
+                # Reserve the final name exclusively, then atomically replace
+                # the reservation. Existing files are never overwritten, even
+                # when a controlled UUID collision produces the same name.
+                reservation_fd = os.open(
+                    file_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+                )
+            except FileExistsError:
+                filename = f"{uuid.uuid4().hex}{extension}"
+                continue
+            os.close(reservation_fd)
+            created_target = file_path
+            break
+
+        os.replace(temp_path, file_path)
+        temp_path = None
+        if not file_path.is_file() or file_path.stat().st_size != len(content):
+            raise OSError("图片保存后校验失败")
+        completed = True
+        return {"path": str(file_path), "filename": file_path.name}
+    except Exception as exc:
+        raise OSError(f"保存图片失败: {exc}") from exc
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+        if created_target is not None and not completed:
+            created_target.unlink(missing_ok=True)
 
 
 async def scan_emoji_folder():
