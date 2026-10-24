@@ -124,7 +124,49 @@ const dialogObserver = new MutationObserver(() => {
   document.body.classList.toggle("ui-modal-open", dialogStack.length > 0);
 });
 for (const dialog of document.querySelectorAll('[role="dialog"]')) {
-  dialogObserver.observe(dialog.parentElement, {
+  const mask = dialog.parentElement;
+  let pointerDownTarget = null;
+  let pointerUpTarget = null;
+  mask.addEventListener(
+    "pointerdown",
+    (event) => {
+      pointerDownTarget = event.target;
+      pointerUpTarget = null;
+    },
+    true,
+  );
+  mask.addEventListener(
+    "pointerup",
+    (event) => {
+      pointerUpTarget = event.target;
+    },
+    true,
+  );
+  mask.addEventListener(
+    "pointercancel",
+    () => {
+      pointerDownTarget = null;
+      pointerUpTarget = null;
+    },
+    true,
+  );
+  mask.addEventListener(
+    "click",
+    (event) => {
+      // Drag selections can retarget click to the dialog or its backdrop.
+      if (
+        event.detail > 0 &&
+        (event.target === mask || event.target === dialog) &&
+        (event.target !== pointerDownTarget || event.target !== pointerUpTarget)
+      ) {
+        event.stopImmediatePropagation();
+      }
+      pointerDownTarget = null;
+      pointerUpTarget = null;
+    },
+    true,
+  );
+  dialogObserver.observe(mask, {
     attributes: true,
     attributeFilter: ["class", "aria-hidden", "hidden"],
   });
