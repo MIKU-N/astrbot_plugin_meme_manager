@@ -4,8 +4,10 @@
 而不是固定写入默认包。
 """
 
+import asyncio
 import io
 import json
+import threading
 import zipfile
 from types import SimpleNamespace
 
@@ -304,12 +306,14 @@ async def test_custom_pack_id_is_used(pack_api, pack_runtime):
         )
     )
     assert manifest["id"] == "my-daily-pack"
+    capabilities = storage.get_pack_export_capabilities("my-daily-pack")
+    assert capabilities["pack_id"] == "my-daily-pack"
 
 
 @pytest.mark.asyncio
 async def test_invalid_custom_pack_id_is_rejected(pack_api, pack_runtime):
     app = Quart(__name__)
-    for pack_id in ("../escape", "a", "bad id"):
+    for pack_id in ("../escape", "a", "bad id", "MyPack", "UPPER", ".hidden"):
         async with app.test_request_context(
             "/", method="POST", json={"name": "非法 ID", "pack_id": pack_id}
         ):
@@ -334,7 +338,6 @@ async def test_duplicate_custom_pack_id_is_rejected(pack_api, pack_runtime):
 @pytest.mark.asyncio
 async def test_chunked_import_assembles_and_inspects_archive(pack_api):
     app = Quart(__name__)
-    session_id = "a" * 32
     archive = _pack_archive_bytes()
     chunks = [archive[: len(archive) // 2], archive[len(archive) // 2 :]]
 
@@ -342,14 +345,14 @@ async def test_chunked_import_assembles_and_inspects_archive(pack_api):
         "/",
         method="POST",
         json={
-            "session_id": session_id,
             "filename": "chunk-pack.zip",
             "total_chunks": len(chunks),
         },
     ):
         response, status = await pack_api._api_start_pack_import_session()
     assert status == 200
-    assert (await response.get_json())["session_id"] == session_id
+    session_id = (await response.get_json())["session_id"]
+    assert len(session_id) == 32
 
     payload = {}
     for index, chunk in enumerate(chunks):
@@ -382,3 +385,168 @@ async def test_chunked_import_rejects_unknown_session(pack_api):
     ):
         _, status = await pack_api._api_upload_pack_import_chunk("b" * 32, "0", "1")
     assert status == 400
+
+
+@pytest.fixture
+def import_client(pack_api):
+    app = Quart(__name__)
+    app.add_url_rule(
+        "/start", view_func=pack_api._api_start_pack_import_session, methods=["POST"]
+    )
+    app.add_url_rule(
+        "/chunk/<session_id>/<index>/<total_chunks>",
+        view_func=pack_api._api_upload_pack_import_chunk,
+        methods=["POST"],
+    )
+    app.add_url_rule(
+        "/apply", view_func=pack_api._api_apply_pack_import, methods=["POST"]
+    )
+    return app.test_client()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("order", [(0, 1, 1, 2), (1, 0, 1, 2), (0, 2, 1, 2)])
+async def test_import_rejects_reordered_chunks_without_corrupting_session(
+    import_client, pack_api, order
+):
+    response = await import_client.post(
+        "/start", json={"filename": "chunk-pack.zip", "total_chunks": 3}
+    )
+    token = (await response.get_json())["session_id"]
+    archive = _pack_archive_bytes()
+    size = len(archive) // 3
+    chunks = [archive[:size], archive[size : size * 2], archive[size * 2 :]]
+    received = 0
+    for index in order:
+        body, ctype = _multipart_body(chunks[index])
+        response = await import_client.post(
+            f"/chunk/{token}/{index}/3", data=body, headers={"Content-Type": ctype}
+        )
+        if index != received:
+            assert response.status_code == 409
+        else:
+            assert response.status_code == 200
+            received += 1
+    assert (await response.get_json())["pack_id"] == "chunk-pack"
+    path, metadata = pack_api._pack_import_session_paths(token)
+    assert path.read_bytes() == archive
+    ready = metadata.read_bytes()
+    response = await import_client.post(
+        f"/chunk/{token}/2/3", data=body, headers={"Content-Type": ctype}
+    )
+    assert response.status_code == 409
+    assert path.read_bytes() == archive
+    assert metadata.read_bytes() == ready
+
+
+@pytest.mark.asyncio
+async def test_concurrent_duplicate_chunks_append_only_once(import_client, pack_api):
+    response = await import_client.post(
+        "/start", json={"filename": "chunk-pack.zip", "total_chunks": 2}
+    )
+    token = (await response.get_json())["session_id"]
+    body, ctype = _multipart_body(b"first chunk")
+    responses = await asyncio.gather(
+        *[
+            import_client.post(
+                f"/chunk/{token}/0/2", data=body, headers={"Content-Type": ctype}
+            )
+            for _ in range(2)
+        ]
+    )
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    path, _ = pack_api._pack_import_session_paths(token)
+    assert path.read_bytes() == b"first chunk"
+
+
+@pytest.mark.asyncio
+async def test_import_sessions_cannot_be_overwritten_or_applied_early(
+    import_client, pack_api
+):
+    payload = {"filename": "pack.zip", "total_chunks": 2, "session_id": "a" * 32}
+    first = await import_client.post("/start", json=payload)
+    token = (await first.get_json())["session_id"]
+    payload["session_id"] = token
+    second = await import_client.post("/start", json=payload)
+    assert (await second.get_json())["session_id"] != token
+    response = await import_client.post(
+        "/apply", json={"import_token": token, "overwrite": True}
+    )
+    assert response.status_code == 409
+    path, metadata = pack_api._pack_import_session_paths(token)
+    assert path.exists() and metadata.exists()
+
+
+@pytest.mark.asyncio
+async def test_invalid_archive_cleans_up_failed_session(import_client, pack_api):
+    response = await import_client.post(
+        "/start", json={"filename": "pack.zip", "total_chunks": 1}
+    )
+    token = (await response.get_json())["session_id"]
+    body, ctype = _multipart_body(b"not a zip")
+    response = await import_client.post(
+        f"/chunk/{token}/0/1", data=body, headers={"Content-Type": ctype}
+    )
+    assert response.status_code == 400
+    assert not any(path.exists() for path in pack_api._pack_import_session_paths(token))
+
+
+@pytest.mark.asyncio
+async def test_busy_category_write_does_not_initialize_metadata(pack_api, pack_runtime):
+    directory = pack_runtime.packs / "pack-b"
+    (directory / "memes_data.json").unlink()
+
+    async def reject(*args):
+        raise RuntimeError("Pack is busy")
+
+    pack_api.semantic_task_manager = SimpleNamespace(run_locked_pack_mutation=reject)
+    app = Quart(__name__)
+    async with app.test_request_context(
+        "/", method="POST", json={"managed_pack_id": "pack-b", "category": "joy"}
+    ):
+        _, status = await pack_api._api_restore_category()
+    assert status == 409
+    assert not (directory / "memes_data.json").exists()
+    assert not (directory / "manifest.json").exists()
+    assert not (directory / "memes" / "joy").exists()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_inspection_keeps_archive_until_worker_exits(
+    import_client, pack_api, monkeypatch
+):
+    started = threading.Event()
+    release = threading.Event()
+
+    def inspect_archive(path, **kwargs):
+        started.set()
+        assert release.wait(5)
+        assert path.is_file()
+        return {"pack_id": "chunk-pack"}
+
+    monkeypatch.setattr(web_api_module, "inspect_pack_archive", inspect_archive)
+    response = await import_client.post(
+        "/start", json={"filename": "pack.zip", "total_chunks": 1}
+    )
+    token = (await response.get_json())["session_id"]
+    body, ctype = _multipart_body(_pack_archive_bytes())
+    app = Quart(__name__)
+
+    async def upload():
+        async with app.test_request_context(
+            "/", method="POST", data=body, headers={"Content-Type": ctype}
+        ):
+            return await pack_api._api_upload_pack_import_chunk(token, "0", "1")
+
+    task = asyncio.create_task(upload())
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert all(path.exists() for path in pack_api._pack_import_session_paths(token))
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not any(path.exists() for path in pack_api._pack_import_session_paths(token))

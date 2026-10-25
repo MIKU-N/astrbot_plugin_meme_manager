@@ -477,10 +477,7 @@ def create_local_pack(
         raise ValueError("表情包描述不能超过 500 个字符")
     requested_id = str(pack_id or "").strip()
     if requested_id:
-        if not re.fullmatch(r"[A-Za-z0-9._-]{2,64}", requested_id):
-            raise ValueError(
-                "表情包 ID 只能包含字母、数字、点、下划线和短横线，长度为 2-64 个字符"
-            )
+        requested_id = validate_pack_id(requested_id, "表情包")
         if requested_id in {".", ".."} or requested_id.startswith("."):
             raise ValueError("表情包 ID 不能以点开头")
         pack_id = requested_id

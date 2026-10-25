@@ -1,5 +1,4 @@
 import json
-import re
 from pathlib import Path
 
 from ...config import (
@@ -10,8 +9,7 @@ from ...config import (
     SELECTION_RULES_PATH,
 )
 from ..semantic.models import runtime_category_mapping
-
-PACK_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{2,64}")
+from .protocol import validate_pack_id
 
 
 def _load_json(path: Path, default):
@@ -188,24 +186,19 @@ def get_pack_paths(pack_id: str) -> dict[str, Path]:
 
 
 def resolve_pack_paths(pack_id: str) -> dict[str, Path]:
-    """解析并校验指定资源包的磁盘路径。
-
-    与 `get_pack_paths` 不同，这里会校验 ID 合法性、确认目录存在并阻止目录穿越，
-    供 WebUI 按包 ID 定位读写目标时使用。
+    """Resolve an existing pack without allowing paths outside the pack root.
 
     Args:
-        pack_id: 目标资源包 ID。
+        pack_id: Protocol-compatible pack identifier.
 
     Returns:
-        包含 pack_id、pack_dir、memes_dir、metadata_path、manifest_path 的字典。
+        Absolute paths for the pack, images, category metadata and manifest.
 
     Raises:
-        ValueError: 资源包 ID 非法。
-        FileNotFoundError: 资源包目录不存在。
+        ValueError: The ID is invalid or escapes the pack root.
+        FileNotFoundError: The requested pack directory does not exist.
     """
-    normalized = str(pack_id or "").strip()
-    if not PACK_ID_PATTERN.fullmatch(normalized):
-        raise ValueError("pack_id 无效")
+    normalized = validate_pack_id(pack_id)
     pack_dir = (PACKS_DIR / normalized).resolve()
     try:
         pack_dir.relative_to(PACKS_DIR.resolve())
@@ -214,7 +207,6 @@ def resolve_pack_paths(pack_id: str) -> dict[str, Path]:
     if not pack_dir.is_dir():
         raise FileNotFoundError(f"表情包 {normalized} 不存在")
     return {
-        "pack_id": normalized,
         "pack_dir": pack_dir,
         "memes_dir": pack_dir / "memes",
         "metadata_path": pack_dir / "memes_data.json",

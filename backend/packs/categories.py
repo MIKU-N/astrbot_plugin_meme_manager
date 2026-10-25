@@ -64,13 +64,7 @@ class CategoryManager:
     def _paths(self) -> dict[str, Path]:
         """返回当前管理目标资源包的管理路径。"""
         if self.pack_id:
-            paths = resolve_pack_paths(self.pack_id)
-            return {
-                "pack_dir": Path(paths["pack_dir"]),
-                "memes_dir": Path(paths["memes_dir"]),
-                "metadata_path": Path(paths["metadata_path"]),
-                "manifest_path": Path(paths["manifest_path"]),
-            }
+            return resolve_pack_paths(self.pack_id)
         context = resolve_pack_context()
         return {
             "pack_dir": Path(context["pack_dir"]),

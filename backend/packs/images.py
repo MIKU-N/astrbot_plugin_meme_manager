@@ -225,15 +225,15 @@ def save_chat_upload_image(
             created_target.unlink(missing_ok=True)
 
 
-async def scan_emoji_folder(pack_id: str | None = None):
+async def scan_emoji_folder():
     """扫描表情包目录，返回所有分类及其表情文件。"""
 
     def scan() -> dict[str, list[str]]:
         emoji_data = {}
-        memes_root = _get_memes_root(pack_id)
+        memes_root = _get_memes_root()
         memes_root.mkdir(parents=True, exist_ok=True)
         for category in os.listdir(memes_root):
-            category_path = _get_category_path(category, pack_id)
+            category_path = _get_category_path(category)
             if not category_path.is_dir():
                 continue
             emoji_data[category] = [
@@ -244,9 +244,9 @@ async def scan_emoji_folder(pack_id: str | None = None):
     return await asyncio.to_thread(scan)
 
 
-def get_emoji_by_category(category, pack_id: str | None = None):
+def get_emoji_by_category(category):
     """获取指定类别下的所有表情包"""
-    category_path = _get_category_path(category, pack_id)
+    category_path = _get_category_path(category)
     if not category_path.is_dir():
         return []
     return [path.name for path in _iter_category_image_paths(category_path)]
@@ -647,14 +647,9 @@ def clear_all_emojis(pack_id: str | None = None) -> dict[str, object]:
     return {"deleted_by_category": deleted_by_category}
 
 
-def update_emoji_in_category(
-    category,
-    old_image_file,
-    new_image_file,
-    pack_id: str | None = None,
-):
+def update_emoji_in_category(category, old_image_file, new_image_file):
     """更新（替换）表情包文件"""
-    category_path = _get_category_path(category, pack_id)
+    category_path = _get_category_path(category)
 
     if not category_path.is_dir():
         return False

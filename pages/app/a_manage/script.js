@@ -908,14 +908,6 @@ async function initApp() {
   let emptyPackGuideShown = false;
   let firstUseCatalogGuideShown = false;
 
-  function slugifyPackId(value) {
-    return String(value || "")
-      .toLowerCase()
-      .replace(/[^a-z0-9._-]+/g, "-")
-      .replace(/^[-.]+|[-.]+$/g, "")
-      .slice(0, 64);
-  }
-
   function formatPackOptionLabel(pack) {
     const name = String(pack?.name || pack?.id || "未命名");
     const id = String(pack?.id || "").trim();
@@ -4125,7 +4117,9 @@ async function initApp() {
         return;
       }
 
-      const state = uploadStateByCategory.get(uploadBlock.dataset.category);
+      const state = uploadStateByCategory.get(
+        `${activeManagePackId}::${uploadBlock.dataset.category}`,
+      );
 
       if (!state) {
         uploadBlock.classList.remove("uploading");
@@ -4174,10 +4168,12 @@ async function initApp() {
   }
 
   function isCategoryUploading(category) {
-    return uploadStateByCategory.has(category);
+    return uploadStateByCategory.has(`${activeManagePackId}::${category}`);
   }
 
   async function uploadFilesToCategory(category, fileList) {
+    const packId = activeManagePackId;
+    const uploadKey = `${packId}::${category}`;
     const { validFiles, invalidCount } = normalizeUploadFiles(fileList);
 
     if (invalidCount > 0) {
@@ -4223,7 +4219,7 @@ async function initApp() {
       currentFileName: uniqueFiles[0]?.name || "",
       refreshing: false,
     };
-    uploadStateByCategory.set(category, uploadState);
+    uploadStateByCategory.set(uploadKey, uploadState);
     refreshUploadDropzones(category);
 
     showToast(
@@ -4243,7 +4239,7 @@ async function initApp() {
       refreshUploadDropzones(category);
 
       try {
-        await uploadEmoji(category, file);
+        await uploadEmoji(category, file, packId);
         uploadState.completed += 1;
       } catch (error) {
         if (error.code === "duplicate_emoji" || error.status === 409) {
@@ -4258,14 +4254,14 @@ async function initApp() {
       refreshUploadDropzones(category);
     }
 
-    if (uploadState.completed > 0) {
+    if (uploadState.completed > 0 && activeManagePackId === packId) {
       uploadState.refreshing = true;
       uploadState.currentFileName = "";
       refreshUploadDropzones(category);
       await refreshUi({ emojis: true });
     }
 
-    uploadStateByCategory.delete(category);
+    uploadStateByCategory.delete(uploadKey);
     refreshUploadDropzones(category);
 
     if (uploadState.failed === 0 && uploadState.duplicates === 0) {
@@ -5771,12 +5767,12 @@ async function initApp() {
   }
 
   // 上传表情包
-  async function uploadEmoji(category, file) {
-    const packId = String(
-      activeManagePackId || managePackSelect?.value || "",
-    ).trim();
-    // 路径段不要在前端二次编码：宿主 bridge 会按段编码一次，
-    // 再次编码会让服务端收到百分号转义后的分类名，从而新建出错误分类。
+  async function uploadEmoji(
+    category,
+    file,
+    packId = activeManagePackId || managePackSelect?.value || "",
+  ) {
+    // The host bridge encodes each path segment once.
     const endpoint = packId
       ? `emoji/add/${packId}/${category}`
       : `emoji/add/${category}`;
@@ -7107,7 +7103,6 @@ async function initApp() {
       managePackSelect.value = activeManagePackId;
       document.getElementById("create-pack-form").reset();
       document.getElementById("create-pack-error").textContent = "";
-      createPackIdTouched = false;
       document.getElementById("create-pack-dialog").showModal();
       document.querySelector("#create-pack-fields input").focus();
       return;
@@ -7118,18 +7113,6 @@ async function initApp() {
   const createPackFields = document.getElementById("create-pack-fields");
   const createPackSubmit = document.getElementById("create-pack-submit");
   const createPackCancel = document.getElementById("create-pack-cancel");
-  const createPackNameInput = createPackDialog.querySelector('[name="name"]');
-  const createPackIdInput = createPackDialog.querySelector('[name="pack_id"]');
-  let createPackIdTouched = false;
-  createPackIdInput?.addEventListener("input", () => {
-    createPackIdTouched = true;
-  });
-  createPackNameInput?.addEventListener("input", () => {
-    if (createPackIdTouched) return;
-    if (createPackIdInput) {
-      createPackIdInput.value = slugifyPackId(createPackNameInput.value);
-    }
-  });
   createPackCancel.addEventListener("click", () => createPackDialog.close());
   createPackDialog.addEventListener("cancel", (event) => {
     if (createPackFields.disabled) event.preventDefault();

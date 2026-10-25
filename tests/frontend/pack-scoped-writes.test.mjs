@@ -84,35 +84,51 @@ test("pack scoped endpoints keep their own payload", async () => {
   assert.equal(c.posted[0].body.managed_pack_id, undefined);
 });
 
-test("uploads target the managed pack", async () => {
+test("uploads target the managed pack without double encoding categories", async () => {
   const c = manageContext("pack-b");
-  await c.uploadEmoji("happy", { name: "a.png" });
-  assert.equal(c.uploaded[0].endpoint, "emoji/add/pack-b/happy");
+  await c.uploadEmoji("开心", { name: "a.png" });
+  assert.equal(c.uploaded[0].endpoint, "emoji/add/pack-b/开心");
 });
 
-test("the default pack read-only gate is gone", () => {
-  assert.equal(script.includes("管理视图模式"), false);
-  assert.equal(script.includes("defaultManagePackId"), false);
-});
-
-test("upload endpoint keeps the category unencoded", async () => {
-  const uploaded = [];
-  const context = vm.createContext({
-    activeManagePackId: "pack-b",
-    managePackSelect: { value: "pack-b" },
-    window: {
-      AstrBotPluginPage: {
-        upload: async (endpoint, file) => {
-          uploaded.push({ endpoint, file });
-          return {};
-        },
-      },
-    },
+for (const failFirst of [false, true]) {
+  test(`switching packs keeps upload batches and progress isolated (failure=${failFirst})`, async () => {
+    const c = manageContext("pack-a");
+    Object.assign(c, {
+      uploadStateByCategory: new Map(),
+      normalizeUploadFiles: files => ({ validFiles: files, invalidCount: 0 }),
+      dedupeUploadFiles: files => ({ uniqueFiles: files, duplicateCount: 0 }),
+      refreshUploadDropzones() {},
+      showToast() {},
+    });
+    let refreshes = 0;
+    c.refreshUi = async () => { refreshes++; };
+    let finishFirst;
+    c.window.AstrBotPluginPage.upload = async (endpoint, file) => {
+      c.uploaded.push({ endpoint, file });
+      if (file.name === "a1.png") {
+        await new Promise((resolve, reject) => {
+          finishFirst = () => failFirst ? reject(new Error("Upload failed")) : resolve({});
+        });
+      }
+      return {};
+    };
+    vm.runInContext(between("  function isCategoryUploading(", "  function createUploadDropzone("), c);
+    const pending = c.uploadFilesToCategory("开心", [{ name: "a1.png" }, { name: "a2.png" }]);
+    c.activeManagePackId = "pack-b";
+    c.managePackSelect.value = "pack-b";
+    await c.uploadFilesToCategory("开心", [{ name: "b.png" }]);
+    assert.equal(refreshes, 1);
+    finishFirst();
+    await pending;
+    assert.deepEqual(c.uploaded.map(({endpoint, file}) => [file.name, endpoint]), [
+      ["a1.png", "emoji/add/pack-a/开心"],
+      ["b.png", "emoji/add/pack-b/开心"],
+      ["a2.png", "emoji/add/pack-a/开心"],
+    ]);
+    assert.equal(refreshes, 1);
+    assert.equal(c.uploadStateByCategory.size, 0);
   });
-  vm.runInContext(uploadHelper, context);
-  await context.uploadEmoji("开心", { name: "a.png" });
-  assert.equal(uploaded[0].endpoint, "emoji/add/pack-b/开心");
-});
+}
 
 test("large archives are uploaded in chunks", async () => {
   const posted = [];
@@ -122,7 +138,7 @@ test("large archives are uploaded in chunks", async () => {
       AstrBotPluginPage: {
         apiPost: async (endpoint, body) => {
           posted.push({ endpoint, body });
-          return {};
+          return { session_id: "a".repeat(32) };
         },
         upload: async (endpoint, file) => {
           uploaded.push({ endpoint, file });
@@ -142,6 +158,7 @@ test("large archives are uploaded in chunks", async () => {
   assert.equal(posted[0].endpoint, "packs/import/session");
   assert.equal(posted[0].body.filename, "big.zip");
   assert.equal(posted[0].body.total_chunks, 3);
+  assert.equal(posted[0].body.session_id, undefined);
   assert.equal(uploaded.length, 3);
   assert.match(uploaded[0].endpoint, /^packs\/import\/session\/chunk\/[0-9a-f]{32}\/0\/3$/);
   assert.match(uploaded[2].endpoint, /^packs\/import\/session\/chunk\/[0-9a-f]{32}\/2\/3$/);
